@@ -1,0 +1,10 @@
+[project]
+name = "jutsu"
+version = "0.1.dev0"
+description = "Jinja2 template engine with a Rust core (WIP port)."
+requires-python = ">=3.10"
+dependencies = ["MarkupSafe>=3.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error"]
