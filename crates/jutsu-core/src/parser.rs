@@ -715,7 +715,7 @@ impl RtParser {
         let body = self.parse_statements(vec!["name:endautoescape".into()], true)?;
         let modifier = Av::node(
             "ScopedEvalContextModifier",
-            None,
+            Some(lineno),
             vec![Av::List(vec![kw]), Av::List(body)],
         );
         Ok(Av::node("Scope", None, vec![Av::List(vec![modifier])]))
@@ -769,9 +769,10 @@ impl RtParser {
             }
         }
 
-        // optional matching endblock name: {% endblock foo %}
+        // optional matching endblock name: {% endblock foo %}  -- the fetch
+        // inside skip_if can surface a pending lexer error, so propagate.
         let expr = format!("name:{}", name);
-        self.skip_if(&expr);
+        let _ = self.skip_if(&expr)?;
         Ok(Av::node(
             "Block",
             Some(lineno),

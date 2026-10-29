@@ -48,16 +48,29 @@ count, rebuild fails loudly rather than silently.
 ## Work items
 
 * [x] PLAN/TODO docs
-* [ ] `parser.rs`: TokenStream mirror (`current`/`look`/`skip`/`push`/`expect`)
-* [ ] expression grammar: condexpr/or/and/not/compare/math1/concat/math2/pow/
+* [x] `parser.rs`: TokenStream mirror (`current`/`look`/`skip`/`push`/`expect`)
+* [x] expression grammar: condexpr/or/and/not/compare/math1/concat/math2/pow/
       unary/primary/tuple/list/dict/postfix/filter_expr/subscript/subscribed/
       call_args/call/filter/test
-* [ ] statement grammar: set/for/if/with/autoescape/block/extends/include/
+* [x] statement grammar: set/for/if/with/autoescape/block/extends/include/
       import/from_import/call_block/filter_block/macro/print/assign_target/
       signature
-* [ ] `subparse` / `parse` (template body, data buffering, end-token stack)
-* [ ] error messages parity (`fail`, `_fail_ut_eof`, expect-style errors)
-* [ ] `ast_rebuild.py` + registry over all concrete node classes
-* [ ] pyo3 glue: `parse(tokens) -> AST | (__error__, msg, lineno)`
-* [ ] differential tests (repo templates + fuzz), dump + lineno equality
-* [ ] flip default, full suite green, commit
+* [x] `subparse` / `parse` (template body, data buffering, end-token stack)
+* [x] error messages parity (`fail`, `_fail_ut_eof`, expect-style errors)
+* [x] `ast_rebuild.py` + registry over all concrete node classes
+* [x] pyo3 glue: `parse(tokens) -> AST | (__error__, msg, lineno)`
+* [x] differential tests (repo templates + fuzz), dump + lineno equality
+* [x] flip default, full suite green, commit
+
+## Lessons recorded
+
+* The python `TokenStream` iterator advances *before* yielding, so consuming
+  it into a list loses the last token fetched before a lexer error.  Consume
+  the wrapped generator directly instead (`rust_parse.wrapped_tokens`).  A
+  partial token is a real, consumable token; the error surfaces only on the
+  fetch *past* it -- mirrored in rust by `tok_at`/`next_tok` raising the
+  stored lexer error exactly where python's generator would.
+* CPython `repr()` short-escapes only `\n`, `\t`, `\r`; everything else uses
+  `\xHH`/`\uXXXX`/`\UXXXXXXXX`.  When a string contains both quote kinds the
+  single quote is kept, apostrophes are escaped and double quotes are left
+  alone (`pyrepr.rs`).

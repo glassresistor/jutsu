@@ -9,19 +9,22 @@ criterion.
 * [X] differential fuzzing (~68k cases) + unit tests; maturin wheel packaging
 
 ## Phase B -- parser port (see PLAN_PARSER.md)
-* [ ] `parser.rs` token stream mirror (`current`, `look`, `skip`, `push`,
+* [X] `parser.rs` token stream mirror (`current`, `look`, `skip`, `push`,
       `expect`, `next_if`, `skip_if`, `eos`) with exact error messages
-* [ ] expression grammar ported in full precedence chain, incl. tuple/list/dict,
+* [X] expression grammar ported in full precedence chain, incl. tuple/list/dict,
       subscripts/slices, calls, filters, tests (`is`/`not`), postfix loops
-* [ ] statement grammar: all 13 keywords + call/filter blocks + assign targets
+* [X] statement grammar: all 13 keywords + call/filter blocks + assign targets
       (tuples, namespace refs) + macro signatures
-* [ ] `subparse` with data buffering and end-token stack bookkeeping
-* [ ] literal pass-through (`__val__`) so big ints survive round-trip
-* [ ] `ast_rebuild.py`: node registry from `fields`, rebuild + equality helpers
-* [ ] differential tests: repo templates, fuzz corpus, dump + lineno parity;
-      error-message parity for the messages the suite asserts
-* [ ] flip default (`JUTSU_RUST_PARSER=1` when no extension tags), original
-      911-test suite green; commit
+* [X] `subparse` with data buffering and end-token stack bookkeeping
+* [X] literal pass-through (`__val__`) so big ints survive round-trip
+* [X] `ast_rebuild.py`: node registry from `fields`, rebuild + equality helpers
+* [X] differential tests: repo templates, fuzz corpus (48k+ cases, 6 seeds),
+      dump + lockstep tree/lineno walk parity; error-message parity incl.
+      expanded ERR_CASES
+* [X] flip default (`JUTSU_RUST_PARSER` on unless extensions contribute
+      tags/streams/preprocessing; `=0` disables), full suite green with rust
+      active (1109 parses through rust, 54 error paths, 51 python fallbacks);
+      committed
 
 ## Phase C -- compiler port (largest chunk)
 * [ ] decide strategy: generate a *rust IR* consumed by a rust evaluator vs.

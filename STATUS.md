@@ -22,8 +22,9 @@ the existing Jinja2 extensions and ecosystem.
 |---|---|
 | Python fork (`jinja2` -> `jutsu`) | done; full original test suite runs unchanged |
 | Rust lexer (`crates/jutsu-core/src/lexer.rs`) | **done and wired into `Lexer.tokeniter`** |
+| Rust parser (`crates/jutsu-core/src/parser.rs`) | **done and wired into `Parser.parse`** (default on; `JUTSU_RUST_PARSER=0` switches back) |
 | Packaging (maturin wheel with rust core) | done (`maturin build -r -m crates/jutsu-core/Cargo.toml`) |
-| Parser / code generator / runtime | still python (next targets) |
+| Code generator / runtime | still python (next targets) |
 
 The lexer port is validated three ways:
 
@@ -58,12 +59,36 @@ point), while reproducing CPython `re` semantics exactly:
 * Python's `repr()` formatting is reproduced for error messages (`unexpected
   char '\'' at N`).
 
+## Parser port notes
+
+The rust parser consumes *wrapped* tokens (literal conversion already done by
+the lexer's `wrap()`), so arbitrary-precision integers and python float
+formatting pass through as opaque pyobjects (`__val__` entries) and are never
+re-parsed in rust.  The AST is serialized as nested tuples and rebuilt into
+`jutsu.nodes.*` instances by `jutsu/ast_rebuild.py` via a registry derived
+from the node classes' `fields` -- unknown classes or wrong arities fail
+loudly.
+
+Validation layers (all green):
+
+1. Dump equality plus lockstep tree comparison including line numbers and
+   attributes (`cmp_tree` in `tests/test_rust_parser.py`).
+2. Differential fuzzing: 48k+ random splices across six seeds, custom
+   delimiters, repo fixture templates.
+3. The original test suite (925 tests) runs with the rust parser as the
+   default engine; instrumentation confirmed 1109 parses through rust, 54 of
+   them error paths whose messages matched exactly, and only extension-enabled
+   environments falling back to the python parser.
+
+Extensions gate the switch: any extension contributing tags (i18n `trans`,
+`do`, loopcontrol's `break`/`continue`, debug), or overriding
+`filter_stream`/`preprocess`, forces the python parser -- see
+`_extensions_contribute()` in `parser.py`.
+
 ## Roadmap
 
-1. **Parser** (`jutsu/parser.py` -> rust): port the expression parser and tag
-   parsers; expose `parse()` from the core returning an AST that can be
-differential-compared against the python parser's node trees before any
-behavioural swap.
+1. **Parser** (`jutsu/parser.py` -> rust): done; wired into `Parser.parse`
+   with differential validation against the python parser's node trees.
 2. **Runtime/interpreter**: a tree-walking evaluator in rust, first as a
    differential renderer used to validate against the python code path,
    then as the default engine once filter/test parity is proven.

@@ -2,11 +2,12 @@
 //!
 //! Rules (from CPython's `unicode_repr`):
 //! - quote selection: prefer ``'``, switch to ``"`` when the string contains
-//!   `'` but not `"`.
+//!   `'` but not `"`.  When it contains both, single quotes are kept and only
+//!   the apostrophes are escaped.
 //! - the active quote and a literal backslash are escaped with a leading
-//!   backslash.
-//! - characters that are not `str.isprintable()` are escaped as `\xHH`
-//!   (< 0x100), `\uXXXX` (< 0x10000) or `\UXXXXXXXX`.
+//!   backslash; ``\n``, ``\t`` and ``\r`` get short escapes, every other
+//!   non-printable character uses `\xHH` (< 0x100), `\uXXXX` (< 0x10000) or
+//!   `\UXXXXXXXX`.
 //! - everything else is emitted literally.
 
 use crate::unicode_tables::is_printable;
@@ -19,6 +20,12 @@ pub fn py_repr_str(s: &str) -> String {
         if ch == quote || ch == '\\' {
             out.push('\\');
             out.push(ch);
+        } else if ch == '\n' {
+            out.push_str("\\n");
+        } else if ch == '\t' {
+            out.push_str("\\t");
+        } else if ch == '\r' {
+            out.push_str("\\r");
         } else if is_printable(ch) {
             out.push(ch);
         } else {
@@ -44,8 +51,9 @@ mod tests {
     fn quotes() {
         assert_eq!(py_repr_str("abc"), "'abc'");
         assert_eq!(py_repr_str("it's"), "\"it's\"");
-        // contains both quote chars -> python keeps single quotes and escapes them
-        assert_eq!(py_repr_str("both ' and \""), "'both \\' and \\\"'");
+        // contains both quote chars -> python keeps single quotes, escapes only
+        // the apostrophe and leaves the double quote alone
+        assert_eq!(py_repr_str("both ' and \""), "'both \\' and \"'");
     }
 
     #[test]

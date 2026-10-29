@@ -1,5 +1,6 @@
 """Parse tokens from the lexer into nodes for the compiler."""
 
+import os
 import typing
 import typing as t
 
@@ -44,6 +45,38 @@ _math_nodes: dict[str, type[nodes.Expr]] = {
     "mod": nodes.Mod,
 }
 
+try:  # optional rust parser core (see PLAN_PARSER.md)
+    from . import rust_parse as _rust_parse
+except ImportError:  # pragma: no cover - pure python installs
+    _rust_parse = None
+
+
+def _extensions_contribute(environment: "Environment") -> bool:
+    """Do any extensions contribute parse tags, stream filters or source
+    preprocessing?  If so the rust parser is not authoritative and we fall
+    back to the python parser (see PLAN_PARSER.md).
+    """
+    # deferred import: ext imports environment which imports this module
+    from .ext import Extension
+
+    for ext in environment.iter_extensions():
+        if getattr(ext, "tags", None):
+            return True
+        if type(ext).filter_stream is not Extension.filter_stream:
+            return True
+        if type(ext).preprocess is not Extension.preprocess:
+            return True
+    return False
+
+
+def _rust_parser_active(environment: "Environment") -> bool:
+    """Is the rust core authoritative for a whole-template parse?"""
+    if _rust_parse is None or not _rust_parse.has_rust_core():
+        return False
+    if os.environ.get("JUTSU_RUST_PARSER", "1") == "0":
+        return False
+    return not _extensions_contribute(environment)
+
 
 class Parser:
     """This is the central parsing class Jinja uses.  It's passed to
@@ -59,6 +92,7 @@ class Parser:
         state: str | None = None,
     ) -> None:
         self.environment = environment
+        self.source = source
         self.stream = environment._tokenize(source, name, filename, state)
         self.name = name
         self.filename = filename
@@ -1036,6 +1070,12 @@ class Parser:
 
     def parse(self) -> nodes.Template:
         """Parse the whole template into a `Template` node."""
+        if _rust_parser_active(self.environment):
+            node = _rust_parse.parse_template(
+                self.environment, str(self.source), self.name, self.filename
+            )
+            node.set_environment(self.environment)
+            return node
         result = nodes.Template(self.subparse(), lineno=1)
         result.set_environment(self.environment)
         return result

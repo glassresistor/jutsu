@@ -9,6 +9,7 @@ import random
 import pytest
 
 from jutsu import _jutsu
+from jutsu import nodes
 from jutsu import rust_parse
 from jutsu.environment import Environment
 from jutsu.exceptions import TemplateSyntaxError
@@ -36,12 +37,47 @@ def rs_parse(env, source):
         return ("err", tuple(exc.args))
 
 
+def cmp_tree(a, b, path="root"):
+    """Lockstep comparison of two node trees including line numbers and
+    attributes (``dump()`` omits both, so this is the extra validation layer)."""
+    if type(a) is not type(b):
+        raise AssertionError(
+            f"type mismatch at {path}: {type(a).__name__} vs {type(b).__name__}"
+        )
+    if getattr(a, "lineno", None) != getattr(b, "lineno", None):
+        raise AssertionError(
+            f"lineno mismatch at {path}: {type(a).__name__} "
+            f"{getattr(a, 'lineno', None)!r} vs {getattr(b, 'lineno', None)!r}"
+        )
+    for name in a.fields:
+        va = getattr(a, name)
+        vb = getattr(b, name)
+        if isinstance(va, nodes.Node):
+            cmp_tree(va, vb, f"{path}.{name}")
+        elif isinstance(va, (list, tuple)) and any(
+            isinstance(x, nodes.Node) for x in va
+        ):
+            if len(va) != len(vb):
+                raise AssertionError(f"length mismatch at {path}.{name}")
+            for i, (x, y) in enumerate(zip(va, vb)):
+                cmp_tree(x, y, f"{path}.{name}[{i}]")
+        elif va != vb:
+            raise AssertionError(
+                f"value mismatch at {path}.{name}: {va!r} vs {vb!r}"
+            )
+
+
 def check(source, env=None):
     env = env or Environment()
     a = py_parse(env, source)
     b = rs_parse(env, source)
     if a != b:
         raise AssertionError(f"parser mismatch for {source!r}\n  python={a!r}\n   rust={b!r}")
+    if a[0] == "ok":
+        # trees agree on dumps; now compare them field by field, linenos included
+        tree_a = Parser(env, source).parse()
+        tree_b = rust_parse.parse_template(env, source)
+        cmp_tree(tree_a, tree_b)
 
 
 CASES = [
@@ -72,6 +108,31 @@ CASES = [
     "{{ x is in [1, 2] }}",
     "{{ x is mapping or y is string }}",
     "{{ a + b|f(1) ~ c }}",
+    "{{ 99999999999999999999999999999999999999 }}",
+    "{{ 0x10 }}",
+    "{{ 0o7 }}",
+    "{{ 0b11 }}",
+    "{{ 1_000 }}",
+    "{{ 1e400 }}",
+    "{{ -0.0 }}",
+    "{{ x|replace('a', 'b')|upper }}",
+    "{{ x is divisibleby 3 }}",
+    "{{ x is not divisibleby(3) }}",
+    "{{ foo['a', 'b'] }}",
+    "{{ x[1:2:3] }}",
+    "{{ a if b else c if d else e }}",
+    "{{ (('a')) }}",
+    "{{ {'%': 'pct'} }}",
+    "{{ ns.x }}",
+    "{% set ns.x = 1 %}",
+    "{% for a in b if c %}{% else %}{% endfor %}",
+    "{% for a in b recursive %}{% endfor %}",
+    "{% if a %}{% elif b %}{% else %}{% endif %}",
+    "{% macro m(*a, **k) %}{% endmacro %}",
+    "{% call m() with a %}{% endcall %}",
+    "{{ x | f(a, b if c else d) }}",
+    "{{ (1 + 2) * 3 ** 4 // 5 % 6 }}",
+    "{{ 'a' if true else 'b' if false else 'c' }}",
     "{% raw %}{{ nope }}{% endraw %}",
     "{#comment#}",
     "{{ {'a': 1, 'b': 2}[key] }}",
@@ -90,6 +151,38 @@ CASES = [
 ]
 
 ERR_CASES = [
+    "{% foo %}",
+    "{% foo %}{% endfoo %}",
+    "{{ x is is 1 }}",
+    "{{ .x }}",
+    "{{ {'a': } }}",
+    "{{ [1, }}",
+    "{{ (1 }}",
+    "{{ {'a' }",
+    "{{ 1 if }}",
+    "{{ 1 if 2 else }}",
+    "{{ x is not }}",
+    "{{ x. }}",
+    "{{ x.[0] }}",
+    "{{ x| }}",
+    "{{ x|f( }}",
+    "{{ a b }}",
+    "{{ 'a' ' }}",
+    "{{ '\\xNN' }}",
+    "{% if 1 %}{% elif 2 %}",
+    "{% block %}x",
+    "{% macro m() %}",
+    "{% for a in b %}",
+    "{% set x = %}",
+    "{% set %}1{% endset %}",
+    "{% extends 'a' %}{% block b %}{% endblock %}{% block c %}{% endblock %}",
+    "{% filter %}x{% endfilter %}",
+    "{% call m( %}",
+    "{% import 'a' as %}",
+    "{% from 'a' import b as %}",
+    "{% include 'a' ignore %}",
+    "{% with a= %}",
+    "{% autoescape true or %}",
     "{% if %}",
     "{% endif %}",
     "{{ }}",
@@ -161,11 +254,11 @@ def test_fuzz(n=6000, seed=1234):
     for _ in range(n):
         k = rng.randint(1, 14)
         src = "".join(rng.choice(FRAGMENTS) for _ in range(k))
-        a = py_parse(Environment(), src)
-        b = rs_parse(Environment(), src)
-        if a != b:
+        try:
+            check(src)
+        except AssertionError as exc:
             mismatches += 1
-            print(f"\nFUZZ MISMATCH {src!r}\n python={a!r}\n    rust={b!r}")
+            print(f"\nFUZZ MISMATCH {src!r}\n {exc}")
             if mismatches > 8:
                 pytest.fail("too many fuzz mismatches")
     assert mismatches == 0

@@ -11,14 +11,18 @@ raises them exactly where python would have.
 """
 import typing as t
 
-from . import _jutsu
+try:  # optional rust core (built via maturin / cargo)
+    from . import _jutsu
+except ImportError:  # pragma: no cover - pure python installs
+    _jutsu = None
+
 from .ast_rebuild import ASTError, LexReraise, rebuild
 from .exceptions import TemplateAssertionError, TemplateSyntaxError
-from .lexer import TokenStream, get_lexer
+from .lexer import get_lexer
 
 
 def has_rust_core() -> bool:
-    return hasattr(_jutsu, "parse")
+    return _jutsu is not None and hasattr(_jutsu, "parse")
 
 
 def wrapped_tokens(
