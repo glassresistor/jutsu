@@ -26,11 +26,17 @@ criterion.
       active (1109 parses through rust, 54 error paths, 51 python fallbacks);
       committed
 
-## Phase C -- compiler port (largest chunk)
-* [ ] decide strategy: generate a *rust IR* consumed by a rust evaluator vs.
-      emitting python bytecode strings.  Recommendation: tree-walking
-      interpreter in rust (`interpreter.rs`) -- no codegen, easier parity with
-      dynamic filters/tests which remain python callables.
+## Phase C -- compiler port (largest chunk, see PLAN_INTERP.md)
+* [X] strategy decided: tree-walking interpreter in rust consuming the rust
+      parser's AST directly (`eval.rs`); python-bytecode emission rejected.
+      Evidence: rebuild of python nodes costs more than the whole rust parse
+      (rust parse ~5x python parser; parse+rebuild only ~1.4x), so evaluating
+      on the rust AST is the only path with real headroom.
+* [X] slice C-v0 (Template/Output/TemplateData/Const/Name) implemented in
+      `crates/jutsu-core/src/eval.rs` + `src/jutsu/rust_eval.py`, differential
+      against python rendering incl. structured corpus; not yet wired into
+      `Template.render` (do that when the supported subset is large enough to
+      matter).
 * [ ] `runtime.rs` mirrors of: Context/EvalContext/LoopContext/Macro/Namespace/
       Undefined (subclasses: ChainableUndefined/FastUndefined), missing sentinel,
       output buffering (`concat`, markup_join, str_join)
