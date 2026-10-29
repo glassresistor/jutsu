@@ -716,13 +716,14 @@ class Lexer:
             self.keep_trailing_newline,
             state,
         )
-        if result and len(result[0]) == 5 and result[0][1] == "__error__":
-            _, _, message, lineno, kind = result[0]
-            if kind == "fail":
-                # jinja's Failure: error_class(message, lineno, filename)
-                raise TemplateSyntaxError(message, lineno, filename)
-            raise TemplateSyntaxError(message, lineno, name, filename)
-        yield from ((int(l), t, v) for l, t, v in result)
+        for item in result:
+            if len(item) == 5 and item[1] == "__error__":
+                _, _, message, lineno, kind = item
+                if kind == "fail":
+                    # jinja's Failure: error_class(message, lineno, filename)
+                    raise TemplateSyntaxError(message, lineno, filename)
+                raise TemplateSyntaxError(message, lineno, name, filename)
+            yield (int(item[0]), item[1], item[2])
 
     def _tokeniter_python(
         self,

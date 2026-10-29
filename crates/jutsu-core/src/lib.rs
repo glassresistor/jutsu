@@ -8,7 +8,19 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 use pyo3::IntoPyObjectExt;
 
-use lexer::{Config, LexError};
+use lexer::{Config, LexError, Tok};
+
+fn push_tokens(
+    py: Python<'_>,
+    list: &Bound<'_, PyList>,
+    toks: Vec<Tok>,
+) -> PyResult<()> {
+    for (lineno, ttype, value) in toks {
+        let tup = (lineno, ttype, value).into_bound_py_any(py)?;
+        list.append(&tup)?;
+    }
+    Ok(())
+}
 
 /// Tokenize a template source with the rust lexer.
 ///
@@ -65,18 +77,15 @@ fn tokenize(
     };
     let list = PyList::empty(py);
     match lexer::tokenize(&cfg, source, state.as_deref()) {
-        Ok(toks) => {
-            for (lineno, ttype, value) in toks {
-                let tup = (lineno, ttype, value).into_bound_py_any(py)?;
-                list.append(&tup)?;
-            }
-        }
-        Err(LexError::Fail { message, lineno }) => {
+        Ok(toks) => push_tokens(py, &list, toks)?,
+        Err(LexError::Fail { message, lineno, partial }) => {
+            push_tokens(py, &list, partial)?;
             let tup = (0u32, "__error__", message, lineno, "fail")
                 .into_bound_py_any(py)?;
             list.append(&tup)?;
         }
-        Err(LexError::Syntax { message, lineno }) => {
+        Err(LexError::Syntax { message, lineno, partial }) => {
+            push_tokens(py, &list, partial)?;
             let tup = (0u32, "__error__", message, lineno, "syntax")
                 .into_bound_py_any(py)?;
             list.append(&tup)?;

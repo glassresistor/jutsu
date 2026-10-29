@@ -35,16 +35,17 @@ pub const T_DATA: &str = "data";
 /// filename ends up in the `name` slot (a quirk preserved for compatibility).
 #[derive(Debug, Clone, PartialEq)]
 pub enum LexError {
-    Fail { message: String, lineno: u32 },
-    Syntax { message: String, lineno: u32 },
+    /// Tokens already produced before the failure (jinja's tokeniter is a
+    /// generator, so partial output must be preserved).
+    Fail { message: String, lineno: u32, partial: Vec<Tok> },
+    Syntax { message: String, lineno: u32, partial: Vec<Tok> },
 }
 
 impl std::fmt::Display for LexError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LexError::Fail { message, .. } | LexError::Syntax { message, .. } => {
-                write!(f, "{}", message)
-            }
+            LexError::Fail { message, .. }
+            | LexError::Syntax { message, .. } => write!(f, "{}", message)
         }
     }
 }
@@ -712,14 +713,21 @@ fn normalize_source(cfg: &Config, source: &str) -> String {
 
 /// python's repr() for a single-char string (enough fidelity for error msgs).
 fn python_repr_char(c: char) -> String {
-    match c {
-        '\'' => "'\\''".to_string(),
-        '\\' => "'\\\\'".to_string(),
-        '\n' => "'\\n'".to_string(),
-        '\t' => "'\\t'".to_string(),
-        '\r' => "'\\r'".to_string(),
-        c if (c as u32) < 0x20 || (c as u32) == 0x7f => format!("'\\x{:02x}'", c as u32),
-        c => format!("'{}'", c),
+    let body = match c {
+        '\n' => "\\n".to_string(),
+        '\t' => "\\t".to_string(),
+        '\r' => "\\r".to_string(),
+        '\\' => "\\\\".to_string(),
+        c if (c as u32) < 0x20 || ((c as u32) >= 0x7f && (c as u32) <= 0xa0) => {
+            format!("\\x{:02x}", c as u32)
+        }
+        _ => c.to_string(),
+    };
+    // python picks "..." when the value contains ' but no "
+    if body.contains('\'') && !body.contains('"') {
+        format!("\"{}\"", body)
+    } else {
+        format!("'{}'", body)
     }
 }
 
@@ -734,7 +742,11 @@ pub fn tokenize(cfg: &Config, source: &str, state: Option<&str>) -> Result<Vec<T
     if let Some(st) = state {
         if st != "root" {
             if st != "variable" && st != "block" {
-                return Err(LexError::Syntax { message: "invalid state".into(), lineno });
+                return Err(LexError::Syntax {
+                    message: "invalid state".into(),
+                    lineno,
+                    partial: Vec::new(),
+                });
             }
             stack.push(format!("{}_begin", st));
         }
@@ -811,10 +823,15 @@ pub fn tokenize(cfg: &Config, source: &str, state: Option<&str>) -> Result<Vec<T
                     stack.pop();
                     line_starting = chars[end - 1] == '\n';
                     pos = end;
+                } else if pos >= n {
+                    // the failure rule `(.)` cannot match at end of input, so
+                    // jinja just ends the stream instead of raising.
+                    break;
                 } else {
                     return Err(LexError::Fail {
                         message: "Missing end of comment tag".into(),
                         lineno,
+                        partial: std::mem::take(&mut out),
                     });
                 }
             }
@@ -843,10 +860,13 @@ pub fn tokenize(cfg: &Config, source: &str, state: Option<&str>) -> Result<Vec<T
                     stack.pop();
                     line_starting = chars[end - 1] == '\n';
                     pos = end;
+                } else if pos >= n {
+                    break;
                 } else {
                     return Err(LexError::Fail {
                         message: "Missing end of raw directive".into(),
                         lineno,
+                        partial: std::mem::take(&mut out),
                     });
                 }
             }
@@ -952,8 +972,9 @@ pub fn tokenize(cfg: &Config, source: &str, state: Option<&str>) -> Result<Vec<T
                         } else if c0 == '}' || c0 == ')' || c0 == ']' {
                             if balancing.is_empty() {
                                 return Err(LexError::Syntax {
-                                    message: format!("unexpected '{}'", python_repr_char(c0)),
+                                    message: format!("unexpected '{}'", c0),
                                     lineno,
+                                    partial: std::mem::take(&mut out),
                                 });
                             }
                             let expected = balancing.pop().unwrap();
@@ -961,10 +982,10 @@ pub fn tokenize(cfg: &Config, source: &str, state: Option<&str>) -> Result<Vec<T
                                 return Err(LexError::Syntax {
                                     message: format!(
                                         "unexpected '{}', expected '{}'",
-                                        python_repr_char(c0),
-                                        python_repr_char(expected)
+                                        c0, expected
                                     ),
                                     lineno,
+                                    partial: std::mem::take(&mut out),
                                 });
                             }
                         }
@@ -981,6 +1002,7 @@ pub fn tokenize(cfg: &Config, source: &str, state: Option<&str>) -> Result<Vec<T
                     return Err(LexError::Syntax {
                         message: format!("unexpected char {} at {}", python_repr_char(c), pos),
                         lineno,
+                        partial: std::mem::take(&mut out),
                     });
                 }
             }
@@ -1029,7 +1051,8 @@ mod tests {
         ];
         for (src, want) in cases {
             let toks = tokenize(&cfg(), src, None).unwrap();
-            assert_eq!(toks[1].1, want, "{}", src);
+            // variable_begin, whitespace, literal
+            assert_eq!(toks[2].1, want, "{}", src);
         }
     }
 
@@ -1057,8 +1080,29 @@ mod tests {
         let err = tokenize(&cfg(), "{# nope", None).unwrap_err();
         assert_eq!(
             err,
-            LexError::Fail { message: "Missing end of comment tag".into(), lineno: 1 }
+            LexError::Fail {
+                message: "Missing end of comment tag".into(),
+                lineno: 1,
+                // the comment_begin token is emitted before the failure
+                partial: vec![(1, T_COMMENT_BEGIN.into(), "{#".into())],
+            }
         );
+    }
+
+    #[test]
+    fn comment_begin_at_eof_does_not_raise() {
+        // jinja's failure rule `(.)` cannot match at end of input, so the
+        // stream simply ends.
+        let toks = tokenize(&cfg(), "foo {#", None).unwrap();
+        assert_eq!(toks.len(), 2);
+    }
+
+    #[test]
+    fn raw_begin_at_eof_does_not_raise() {
+        let toks = tokenize(&cfg(), "{% raw %}", None).unwrap();
+        // stream ends without an error
+        assert_eq!(toks.len(), 1);
+        assert_eq!(toks[0].1, T_RAW_BEGIN);
     }
 
     #[test]
@@ -1072,9 +1116,11 @@ mod tests {
     #[test]
     fn strip_minus() {
         let toks = tokenize(&cfg(), "   {{- foo -}}   ", None).unwrap();
-        // whitespace before/after removed from the data tokens
-        assert_eq!(toks[0].2, "   ".repeat(0));
-        assert_eq!(toks[0].0, 1);
+        // leading whitespace stripped by `{{-`; trailing whitespace consumed
+        // into the variable_end token value by the `-}}\s*` variant.
+        assert_eq!(toks.len(), 5);
+        assert_eq!(toks[0].2, "{{-");
+        assert_eq!(toks[4].2, "-}}   ");
     }
 
     #[test]
@@ -1082,7 +1128,8 @@ mod tests {
         let mut c = cfg();
         c.lstrip_blocks = true;
         let toks = tokenize(&c, "   {% foo %}", None).unwrap();
-        assert_eq!(toks[0].2, "", "leading whitespace should be stripped");
+        // the leading whitespace is dropped entirely (empty data token skipped)
+        assert_eq!(toks[0].1, T_BLOCK_BEGIN);
     }
 
     #[test]
@@ -1098,6 +1145,10 @@ mod tests {
         let mut c = cfg();
         c.line_comment_prefix = Some("#".into());
         let toks = tokenize(&c, "foo # bar\nbaz", None).unwrap();
-        assert!(toks.iter().any(|t| t.1 == T_LINECOMMENT_BEGIN));
+        assert_eq!(toks[0].1, T_DATA);
+        assert_eq!(toks[0].2, "foo");
+        // the comment token includes the preceding whitespace run
+        assert_eq!(toks[1].1, T_LINECOMMENT_BEGIN);
+        assert_eq!(toks[1].2, " #");
     }
 }
