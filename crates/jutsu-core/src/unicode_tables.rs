@@ -894,18 +894,35 @@ pub static DIGIT_CHARS: &[(u32, u32)] = &[
 
 pub fn in_ranges(cp: u32, rs: &[(u32, u32)]) -> bool {
     let (mut lo, mut hi) = (0usize, rs.len());
-    if hi == 0 { return false; }
+    if hi == 0 {
+        return false;
+    }
     hi -= 1;
     while lo <= hi {
         let mid = (lo + hi) / 2;
         let (a, b) = rs[mid];
-        if cp < a { if mid == 0 { break; } hi = mid - 1; }
-        else if cp > b { lo = mid + 1; }
-        else { return true; }
+        if cp < a {
+            if mid == 0 {
+                break;
+            }
+            hi = mid - 1;
+        } else if cp > b {
+            lo = mid + 1;
+        } else {
+            return true;
+        }
     }
     false
 }
 
-pub fn is_ident(c: char) -> bool { in_ranges(c as u32, IDENT_CHARS) }
-pub fn is_ws(c: char) -> bool { in_ranges(c as u32, WS_CHARS) }
-pub fn is_digit(c: char) -> bool { in_ranges(c as u32, DIGIT_CHARS) }
+pub fn is_ident(c: char) -> bool {
+    in_ranges(c as u32, IDENT_CHARS)
+}
+
+pub fn is_ws(c: char) -> bool {
+    in_ranges(c as u32, WS_CHARS)
+}
+
+pub fn is_digit(c: char) -> bool {
+    in_ranges(c as u32, DIGIT_CHARS)
+}
