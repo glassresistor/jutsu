@@ -264,6 +264,29 @@ def test_fuzz(n=6000, seed=1234):
     assert mismatches == 0
 
 
+def test_structured_fuzz(n=4000, seed=17):
+    """Structured generator (tests/gen_templates.py): grammatically plausible
+    templates hitting deep grammar corners; compared with the full tree and
+    lineno walk."""
+    import random as _random
+
+    from gen_templates import Gen
+
+    rng = _random.Random(seed)
+    g = Gen(rng)
+    mismatches = 0
+    for _ in range(n):
+        src = g.template()
+        try:
+            check(src)
+        except AssertionError as exc:
+            mismatches += 1
+            print(f"\nSTRUCT MISMATCH {src!r}\n {exc}")
+            if mismatches > 8:
+                pytest.fail("too many structured fuzz mismatches")
+    assert mismatches == 0
+
+
 def test_loader_fixture_files():
     d = os.path.join(os.path.dirname(__file__), "res", "templates")
     env = Environment()
