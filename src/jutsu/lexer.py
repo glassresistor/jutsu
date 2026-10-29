@@ -4,6 +4,7 @@ the bitshift operators we don't allow in templates. It separates
 template code and python code in expressions.
 """
 
+import os
 import re
 import typing as t
 from ast import literal_eval
@@ -13,6 +14,11 @@ from sys import intern
 from ._identifier import pattern as name_re
 from .exceptions import TemplateSyntaxError
 from .utils import LRUCache
+
+try:  # optional rust core (built via maturin / cargo)
+    from . import _jutsu as _rust_lexer
+except ImportError:  # pragma: no cover - pure python fallback
+    _rust_lexer = None
 
 if t.TYPE_CHECKING:
     import typing_extensions as te
@@ -511,6 +517,17 @@ class Lexer:
 
         self.lstrip_blocks = environment.lstrip_blocks
 
+        # configuration kept for the rust core tokenizer
+        self.block_start_string = environment.block_start_string
+        self.block_end_string = environment.block_end_string
+        self.variable_start_string = environment.variable_start_string
+        self.variable_end_string = environment.variable_end_string
+        self.comment_start_string = environment.comment_start_string
+        self.comment_end_string = environment.comment_end_string
+        self.line_statement_prefix = environment.line_statement_prefix
+        self.line_comment_prefix = environment.line_comment_prefix
+        self.trim_blocks = environment.trim_blocks
+
         self.newline_sequence = environment.newline_sequence
         self.keep_trailing_newline = environment.keep_trailing_newline
 
@@ -667,6 +684,47 @@ class Lexer:
             yield Token(lineno, token, value)
 
     def tokeniter(
+        self,
+        source: str,
+        name: str | None,
+        filename: str | None = None,
+        state: str | None = None,
+    ) -> t.Iterator[tuple[int, str, str]]:
+        """Tokenize with the rust core when available (the default), falling
+        back to the pure python implementation otherwise.
+
+        Errors are converted into :exc:`TemplateSyntaxError` exactly like the
+        original implementation raises them, including the quirk that
+        ``Failure`` errors put the filename into the ``name`` slot.
+        """
+        if _rust_lexer is None or os.environ.get("JUTSU_RUST_LEXER", "1") == "0":
+            yield from self._tokeniter_python(source, name, filename, state)
+            return
+
+        result = _rust_lexer.tokenize(
+            source,
+            self.block_start_string,
+            self.block_end_string,
+            self.variable_start_string,
+            self.variable_end_string,
+            self.comment_start_string,
+            self.comment_end_string,
+            self.line_statement_prefix,
+            self.line_comment_prefix,
+            self.trim_blocks,
+            self.lstrip_blocks,
+            self.keep_trailing_newline,
+            state,
+        )
+        if result and len(result[0]) == 5 and result[0][1] == "__error__":
+            _, _, message, lineno, kind = result[0]
+            if kind == "fail":
+                # jinja's Failure: error_class(message, lineno, filename)
+                raise TemplateSyntaxError(message, lineno, filename)
+            raise TemplateSyntaxError(message, lineno, name, filename)
+        yield from ((int(l), t, v) for l, t, v in result)
+
+    def _tokeniter_python(
         self,
         source: str,
         name: str | None,
