@@ -8,12 +8,14 @@ import random
 
 import pytest
 
-from jutsu import _jutsu
 from jutsu.environment import Environment
 from jutsu.exceptions import TemplateSyntaxError
 from jutsu.lexer import Lexer
 
-pytest.importorskip("jutsu._jutsu", reason="rust core not built")
+try:
+    from jutsu import _jutsu  # noqa: F401
+except ImportError:  # pragma: no cover - rust core not built
+    pytest.skip("rust core not built", allow_module_level=True)
 
 CONFIGS = [
     {},
