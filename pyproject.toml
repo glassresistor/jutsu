@@ -7,4 +7,5 @@ dependencies = ["MarkupSafe>=3.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 filterwarnings = ["error"]

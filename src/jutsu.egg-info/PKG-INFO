@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: jutsu
+Version: 0.1.dev0
+Summary: Jinja2 template engine with a Rust core (WIP port).
+Requires-Python: >=3.10
+License-File: LICENSE.txt
+Requires-Dist: MarkupSafe>=3.0
+Dynamic: license-file
