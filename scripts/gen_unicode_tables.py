@@ -37,9 +37,30 @@ def fmt(rs):
     return ",\n".join(f"    ({a}, {b})" for a, b in rs)
 
 
+def ranges_printable():
+    out = []
+    in_set = False
+    start = None
+    for cp in range(MAX):
+        try:
+            ok = chr(cp).isprintable()
+        except ValueError:
+            ok = False
+        if ok and not in_set:
+            in_set = True
+            start = cp
+        elif not ok and in_set:
+            in_set = False
+            out.append((start, cp - 1))
+    if in_set:
+        out.append((start, MAX - 1))
+    return out
+
+
 ident = ranges_for(name_re)
 ws = ranges_for(re.compile(r"\s"))
 digit = ranges_for(re.compile(r"\d"))
+printable = ranges_printable()
 
 src = f'''//! Unicode character tables generated from CPython's `re` semantics.
 //! See `scripts/gen_unicode_tables.py`. Do not edit by hand.
@@ -57,6 +78,12 @@ pub static WS_CHARS: &[(u32, u32)] = &[
 /// Characters matching Python's `\\d` for str patterns.
 pub static DIGIT_CHARS: &[(u32, u32)] = &[
 {fmt(digit)}
+];
+
+/// Ranges of characters where `chr(cp).isprintable()` is True (needed to
+/// reproduce python's `repr()` in error messages).
+pub static PRINTABLE_RANGES: &[(u32, u32)] = &[
+{fmt(printable)}
 ];
 
 pub fn in_ranges(cp: u32, rs: &[(u32, u32)]) -> bool {{
@@ -92,6 +119,10 @@ pub fn is_ws(c: char) -> bool {{
 
 pub fn is_digit(c: char) -> bool {{
     in_ranges(c as u32, DIGIT_CHARS)
+}}
+
+pub fn is_printable(c: char) -> bool {{
+    in_ranges(c as u32, PRINTABLE_RANGES)
 }}
 '''
 

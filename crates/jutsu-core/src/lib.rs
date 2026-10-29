@@ -2,6 +2,8 @@
 //! will grow into the full template engine core.
 
 pub mod lexer;
+pub mod parser;
+pub mod pyrepr;
 pub mod unicode_tables;
 
 use pyo3::prelude::*;
@@ -94,6 +96,110 @@ fn tokenize(
     Ok(list.into())
 }
 
+use parser::{Av, PToken, RtParser};
+use pyo3::types::PyTuple;
+
+/// Serialize an `Av` into the tuple encoding documented in ast_rebuild.py.
+fn av_to_py<'py>(py: Python<'py>, av: &Av) -> PyResult<Bound<'py, PyAny>> {
+    let items: Vec<Bound<'py, PyAny>> = match av {
+        Av::Node(name, lineno, args) => {
+            let mut v: Vec<Bound<'py, PyAny>> = vec![
+                "__node__".into_bound_py_any(py)?,
+                (*name).into_bound_py_any(py)?,
+                match lineno {
+                    Some(l) => l.into_bound_py_any(py)?,
+                    None => Option::<String>::None.into_bound_py_any(py)?,
+                },
+            ];
+            for a in args {
+                v.push(av_to_py(py, a)?);
+            }
+            v
+        }
+        Av::List(inner) => {
+            let mut v: Vec<Bound<'py, PyAny>> = vec!["__list__".into_bound_py_any(py)?];
+            for i in inner {
+                v.push(av_to_py(py, i)?);
+            }
+            v
+        }
+        Av::Tuple(inner) => {
+            let mut v: Vec<Bound<'py, PyAny>> = vec!["__tup__".into_bound_py_any(py)?];
+            for i in inner {
+                v.push(av_to_py(py, i)?);
+            }
+            v
+        }
+        Av::Join(parts) => {
+            let mut v: Vec<Bound<'py, PyAny>> = vec!["__joinstr__".into_bound_py_any(py)?];
+            for p in parts {
+                v.push(av_to_py(py, p)?);
+            }
+            v
+        }
+        Av::Str(s) => {
+            vec!["__val__".into_bound_py_any(py)?, s.as_str().into_bound_py_any(py)?]
+        }
+        Av::Bool(b) => vec!["__val__".into_bound_py_any(py)?, b.into_bound_py_any(py)?],
+        Av::NoneV => vec!["__val__".into_bound_py_any(py)?, Option::<String>::None.into_bound_py_any(py)?],
+        Av::Val(obj) => {
+            vec!["__val__".into_bound_py_any(py)?, obj.clone_ref(py).into_bound(py)]
+        }
+    };
+    Ok(PyTuple::new(py, items)?.into_any())
+}
+
+/// Parse a wrapped token stream into the serialized AST encoding.
+///
+/// `tokens` is a list of `(lineno, token_type, value)` tuples as produced by
+/// `Lexer.wrap`.  Returns either the AST tuple tree or a single-element style
+/// error tuple ("__perr__", message, lineno, kind) -- see ast_rebuild.py.
+#[pyfunction]
+#[pyo3(signature = (tokens, lexerr = None))]
+fn parse<'py>(
+    py: Python<'py>,
+    tokens: Vec<(u32, String, Py<PyAny>)>,
+    lexerr: Option<Py<PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let mut ptoks = Vec::with_capacity(tokens.len());
+    for (lineno, ttype, value) in &tokens {
+        let pv = if ttype == "integer" || ttype == "float" {
+            parser::PV::Num(std::sync::Arc::new(value.clone_ref(py)))
+        } else {
+            match value.extract::<String>(py) {
+                Ok(s) => parser::PV::Str(s),
+                Err(_) => parser::PV::Num(std::sync::Arc::new(value.clone_ref(py))),
+            }
+        };
+        ptoks.push(PToken { lineno: *lineno, ttype: ttype.clone(), pv });
+    }
+    let mut rp = RtParser::new(ptoks, lexerr.map(std::sync::Arc::new));
+    match rp.parse() {
+        Ok(av) => av_to_py(py, &av),
+        Err(e) if e.lexerr.is_some() => {
+            // Re-raise the stored python exception args verbatim.
+            let stored = e.lexerr.as_ref().unwrap();
+            let items: Vec<Bound<'py, PyAny>> = vec![
+                "__lexerr__".into_bound_py_any(py)?,
+                stored.clone_ref(py).into_bound(py),
+            ];
+            Ok(PyTuple::new(py, items)?.into_any())
+        }
+        Err(e) => {
+            let items: Vec<Bound<'py, PyAny>> = vec![
+                "__perr__".into_bound_py_any(py)?,
+                e.message.into_bound_py_any(py)?,
+                match e.lineno {
+                    Some(l) => l.into_bound_py_any(py)?,
+                    None => Option::<String>::None.into_bound_py_any(py)?,
+                },
+                e.cls.as_str().into_bound_py_any(py)?,
+            ];
+            Ok(PyTuple::new(py, items)?.into_any())
+        }
+    }
+}
+
 #[pyfunction]
 fn ping() -> PyResult<String> {
     Ok("pong".to_string())
@@ -103,5 +209,6 @@ fn ping() -> PyResult<String> {
 fn _jutsu(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ping, m)?)?;
     m.add_function(wrap_pyfunction!(tokenize, m)?)?;
+    m.add_function(wrap_pyfunction!(parse, m)?)?;
     Ok(())
 }
