@@ -1202,9 +1202,10 @@ other => Err(nope(other.to_string())),
     }
 
     /// Shared loop scope analysis for a `for` node: analyze_node visits the
-    /// target (as parameters) and the body first; the test expression only
-    /// contributes loads afterwards (during emission), so it never overrides
-    /// a decision made by an earlier occurrence.
+    /// target (as parameters) and the body; the test expression belongs to a
+    /// separate frame (`analyze_node(for_branch="test")`) built by
+    /// `test_kinds` -- merging them would let a body store shadow the very
+    /// name the test resolves from the context.
     fn loop_kinds(&self, args: &[Av]) -> ERes<(HashMap<String, IK>, bool)> {
         let mut occs: Vec<(String, u8)> = Vec::new();
         self.walk_fsf(&args[0], &mut occs);
@@ -1215,9 +1216,6 @@ other => Err(nope(other.to_string())),
         for it in body {
             self.walk_fsf(it, &mut occs);
         }
-        if !matches!(&args[4], Av::NoneV) {
-            self.walk_fsf(&args[4], &mut occs);
-        }
         let ancestors = self.owned_union();
         let mut kinds = self.build_kinds(&occs, &ancestors);
         let extended = args.len() > 5 && self.deep_name_load_in(body, "loop");
@@ -1225,6 +1223,18 @@ other => Err(nope(other.to_string())),
             kinds.insert("loop".to_string(), IK::Param);
         }
         Ok((kinds, extended))
+    }
+
+    /// Symbols of the test-filter frame: target parameters plus whatever the
+    /// test expression loads; must be computed before the loop frame is on
+    /// the stack so that loads resolve from context and never see a body
+    /// store of the same name.
+    fn test_kinds(&self, args: &[Av]) -> ERes<HashMap<String, IK>> {
+        let mut occs: Vec<(String, u8)> = Vec::new();
+        self.walk_fsf(&args[0], &mut occs);
+        self.walk_fsf(&args[4], &mut occs);
+        let ancestors = self.owned_union();
+        Ok(self.build_kinds(&occs, &ancestors))
     }
 
     fn exec_for(&self, args: &[Av], out: &mut Vec<Bound<'py, PyAny>>) -> ERes<()> {
@@ -1235,6 +1245,11 @@ other => Err(nope(other.to_string())),
             Av::Bool(b) => *b,
             _ => return Err(nope("bad recursive flag")),
         };
+        if recursive && !matches!(&args[4], Av::NoneV) {
+            // The test filter wraps the reciter at every recursion level;
+            // deferred until that generator path is implemented.
+            return Err(nope("recursive loop with test filter"));
+        }
         if recursive {
             let v = self.node(&args[1])?;
             let res = self.run_recursive(args, v, 0)?;
@@ -1273,19 +1288,34 @@ other => Err(nope(other.to_string())),
                 ran = true;
             }
         } else if has_test {
-            // lazy filtering, interleaving test and body evaluation exactly
-            // like the generated filter function
+            // Lazy filtering: the test runs in its own frame (the generated
+            // filter function), so its loads resolve from context and never
+            // observe a store of the same name made by the loop body.
+            let kt = self.test_kinds(args)?;
             let mut it = iter_val.try_iter()?;
             while let Some(item_r) = it.next() {
                 let item: Bound<'py, PyAny> = item_r?;
-                self.enter_scope(&kinds)?;
-                self.store_target(&args[0], &item, false)?;
-                let t = self.node(&args[4])?;
-                if t.is_truthy()? {
-                    self.exec_items(&body_of(args), out)?;
+                self.enter_scope(&kt)?;
+                let pass = match self.store_target(&args[0], &item, false) {
+                    Ok(()) => {
+                        let t = self.node(&args[4])?;
+                        t.is_truthy()?
+                    }
+                    Err(e) => {
+                        return Err(e);
+                    }
+                };
+                self.pop_scope();
+                if pass {
+                    self.enter_scope(&kinds)?;
+                    self.store_target(&args[0], &item, false)?;
+                    let res = self.exec_items(&body_of(args), out);
+                    self.pop_scope();
+                    if res.is_err() {
+                        return Err(res.unwrap_err());
+                    }
                     ran = true;
                 }
-                self.pop_scope();
             }
         } else {
             let mut it = iter_val.try_iter()?;

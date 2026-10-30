@@ -77,6 +77,12 @@ criterion.
       block inheritance and includes (next slices C-v3/C-v4).
 * [ ] block inheritance machinery (super(), blocks dict, scoped blocks,
       required blocks) ported onto the interpreter
+* [X] follow-up fix: the for-loop `if=` test evaluates in its own frame (the
+      generated filter function) -- loads resolve from the context and never
+      observe body stores of the same name; unpack-of-undefined parity
+      restored.  Recursive loops combined with `if=` fall back until the
+      reciter-wrapping generator exists.  Statement fuzz corpus grown to ~80k
+      templates (seeds 1-10, 8k/seed): zero mismatches.
 * [X] slice C-v3a: filter-block semantics (buffered body in its own scope
       frame, implicit filter target = joined buffer, chain via
       `_filter_test_common`, result finalized with `str`); occurrence order

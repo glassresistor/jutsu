@@ -81,8 +81,11 @@ def run(seed, n):
 
 
 if __name__ == "__main__":
+    import sys as _sys
+    seeds = tuple(int(x) for x in _sys.argv[1:]) or (1, 2, 3)
+    n = 8000
     total = 0
-    for seed in (1, 2, 3):
-        total += run(seed, 4000)
+    for seed in seeds:
+        total += run(seed, n)
     print("TOTAL DIFFS", total)
     sys.exit(1 if total else 0)

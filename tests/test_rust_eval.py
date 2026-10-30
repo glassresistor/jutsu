@@ -477,6 +477,33 @@ def test_v3_cases():
             assert r[1] == want, f"{src!r}: {r[1]!r} != {want!r}"
 
 
+def test_test_filter_frame_resolves_from_context():
+    """The ``if=`` test of a for loop resolves names from the context, not
+    from stores made by the body: the generated code runs it in its own
+    filter function (separate frame)."""
+    env = Environment()
+    src = ("{% for a in [1,2] if t %}{% set t = 'x' %}[{{t}}]{% endfor %}"
+           "|{{ t }}|")
+    vars_ = {"t": True}
+    p = _py_pair(env, src, vars_)
+    r = _rust_pair(env, src, vars_)
+    assert r[0] != "fallback", f"unsupported: {src!r}"
+    assert r == p, f"{r} != {p}"
+
+
+def test_unpack_of_undefined_matches():
+    """Regression (fuzz seed 6): unpacking an undefined value must raise the
+    same python ValueError inside a test-filtered loop."""
+    env = Environment()
+    src = ("{{ y.loop }}{% for a in {86 : x.y} if c%}{% set ((a, b), c) = "
+           "x.b-%}-{% endfor %}%\n\n")
+    vars_ = {"a": {"b": 2}, "x": "hello", "y": 42, "c": {1: "one"}}
+    p = _py_pair(env, src, vars_)
+    r = _rust_pair(env, src, vars_)
+    assert r[0] != "fallback", f"unsupported: {src!r}"
+    assert r == p, f"{r} != {p}"
+
+
 def test_autoescape_falls_back():
     """Autoescape needs the dedicated markup slice (compile-time constant
     folding is not markup aware in the python code generator), so every

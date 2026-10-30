@@ -145,6 +145,13 @@ inheritance and includes (dedicated slices C-v3/C-v4), dynamic call arguments,
 autoescape/Markup, environment finalize functions and volatile eval contexts
 -- all reported as unsupported so callers fall back to the python engine.
 
+The `if=` test of a for loop runs in its own frame (mirroring the generated
+filter function): its loads resolve from the context and never observe a store
+of the same name made by the loop body -- merging those symbols would make
+`{% for a in xs if t %}{% set t = ... %}` skip every iteration.  Recursive
+loops combined with `if=` are reported as unsupported until the reciter-wrapping
+generator path exists.
+
 Slice C-v3a adds filter blocks: body renders into a buffer inside its own
 scope frame, the implicit filter target receives the joined buffer and the
 chain is applied through `_filter_test_common`, then the result goes through
