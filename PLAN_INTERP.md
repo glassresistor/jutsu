@@ -38,10 +38,16 @@ The compiler port has two candidate strategies:
       `Environment.from_string(...).render()` on the generated corpus.
       Entry point `_jutsu.eval_template(tokens, lexerr, ctx)` parses and
       evaluates without ever serializing the AST to python.
-* [ ] C-v1: expression evaluation: arithmetic, comparisons, concat (`~`),
-      `in`, and-or-not-if-expr, tuple/list/dict literals, subscripts/slices,
-      attribute access, calls with kwargs, filter/test expressions via the
-      python-side filters/tests (pyo3 callbacks).
+* [x] C-v1: expression evaluation: arithmetic, chained comparisons, concat
+      (`~`), `in`/`not in`, and-or-not-if-expr, tuple/list/dict literals,
+      subscripts/slices, attribute access, calls with kwargs, filter/test
+      expressions via the python-side filters/tests.  Runtime exceptions are
+      propagated as the original python exception objects; parse errors get
+      the same `translated` treatment `Environment.compile` applies.
+      Deferred to later slices: dynamic call arguments (`*a`/`**k`),
+      autoescape + Markup (including the non-markup-aware constant folding of
+      `Concat.as_const`), environment finalize functions, volatile eval
+      contexts -- all report unsupported so callers fall back.
 * [ ] C-v2: statements: print/set(+block)/if/for (incl. recursive + LoopContext
       features cycle/first/last/revidx/depth/length/parent), with/autoescape
       scope modifiers, block/include/import/from_import semantics via the

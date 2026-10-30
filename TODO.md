@@ -37,6 +37,21 @@ criterion.
       against python rendering incl. structured corpus; not yet wired into
       `Template.render` (do that when the supported subset is large enough to
       matter).
+* [X] slice C-v1 (expressions) implemented in `eval.rs`: arithmetic, chained
+      comparisons with python short-circuit semantics, concat (`~`), tuples /
+      lists / dicts, subscripts and slices, attribute access,
+      calls via `Context.call`, filters/tests via
+      `Environment._filter_test_common`, inline if-expressions incl. the
+      implicit-else runtime `Undefined`, `and`/`or`/`not`, literals.
+      Values are live python objects at every step, so operator behaviour on
+      `Undefined` and raised exceptions match the compiled engine exactly.
+      Validated: fixed cases plus a 6k-template structured expression corpus
+      comparing rendered text *and* exception type/message (`tests/
+      test_rust_eval.py`).  Deferred on purpose: dynamic call arguments
+      (`*a`/`**k`) and autoescape/Markup (the code generator folds constant
+      output children with the non-markup-aware `Concat.as_const`) both report
+      unsupported; environment finalize functions and volatile eval contexts
+      too.  Driver creates a real `Context` via `runtime.new_context`.
 * [ ] `runtime.rs` mirrors of: Context/EvalContext/LoopContext/Macro/Namespace/
       Undefined (subclasses: ChainableUndefined/FastUndefined), missing sentinel,
       output buffering (`concat`, markup_join, str_join)

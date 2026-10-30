@@ -143,34 +143,46 @@ fn err_tuple<'py>(
 }
 
 /// Parse and evaluate a whole template in rust without rebuilding python
-/// nodes (slice v0 of the interpreter port, see PLAN_INTERP.md).  Returns
-/// `("__okrender__", text)`, `["__unsupported__", node]`, `["__efail__",
-/// message]` or a parse/lexer error tuple.
+/// nodes (slice v1 of the interpreter port, see PLAN_INTERP.md).  `ctx` is a
+/// live python `Context`, `rt` the `jutsu.runtime` module and `name` the
+/// optional template name.  Returns `["__okrender__", text]` or
+/// `["__unsupported__", node]`; runtime exceptions are raised into python
+/// directly so they propagate untouched (matching how the compiled engine
+/// re-raises them through `Environment.handle_exception`).
 #[pyfunction]
-#[pyo3(signature = (tokens, lexerr = None, ctx = None))]
+#[pyo3(signature = (tokens, lexerr = None, ctx = None, rt = None, name = None))]
 fn eval_template<'py>(
     py: Python<'py>,
     tokens: Vec<(u32, String, Py<PyAny>)>,
     lexerr: Option<Py<PyAny>>,
     ctx: Option<Py<PyAny>>,
+    rt: Option<Py<PyAny>>,
+    name: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let ptoks = to_ptokens(py, &tokens);
     let mut rp = RtParser::new(ptoks, lexerr.map(Arc::new));
     match rp.parse() {
         Ok(av) => {
-            let ctx = match ctx {
-                Some(c) => c,
-                None => return Err(pyo3::exceptions::PyTypeError::new_err(
-                    "eval_template needs a context dict",
-                )),
+            let (cbox, rtbox) = match (ctx, rt) {
+                (Some(c), Some(r)) => (c.bind(py).clone(), r.bind(py).clone()),
+                _ => {
+                    return Err(pyo3::exceptions::PyTypeError::new_err(
+                        "eval_template needs a context and the runtime module",
+                    ))
+                }
             };
-            match eval::evaluate(py, &av, ctx) {
-                eval::EvalOutcome::Rendered(s) => Ok(("__okrender__", s)
-                    .into_bound_py_any(py)?.into_any()),
-                eval::EvalOutcome::Unsupported(n) => Ok(("__unsupported__", n)
-                    .into_bound_py_any(py)?.into_any()),
-                eval::EvalOutcome::Failed(m) => Ok(("__efail__", m)
-                    .into_bound_py_any(py)?.into_any()),
+            match eval::evaluate(py, &av, cbox, rtbox, name) {
+                eval::EvalOutcome::Rendered(v) => {
+                    let items: Vec<Bound<'py, PyAny>> = vec![
+                        "__okrender__".into_bound_py_any(py)?,
+                        v,
+                    ];
+                    Ok(PyTuple::new(py, items)?.into_any())
+                }
+                eval::EvalOutcome::Unsupported(n) => {
+                    Ok(("__unsupported__", n).into_bound_py_any(py)?.into_any())
+                }
+                eval::EvalOutcome::Exc(e) => Err(e),
             }
         }
         Err(e) => err_tuple(py, e),
