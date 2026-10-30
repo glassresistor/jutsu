@@ -161,6 +161,18 @@ blocks; loop frames analyze target+body before the test expression registers
 its loads -- matching when a later occurrence must not override an earlier
 decision.
 
+Branch-aware symbol merging (gap found by fuzz seed 2, now closed): the
+occurrence walk collects structured occurrences per `if` statement (the test,
+then one group per branch, with the elif chain as nested structure), and the
+slot-kind builder evaluates each branch group against an independent copy of
+the region state before merging them exactly like python's
+`Symbols.copy`/`branch_update`: names stored only inside branches become
+RESOLVE loads (ALIAS when an ancestor scope owns them) -- a store that may
+never have executed cannot shadow the context value with a missing slot.
+Nested ifs recurse; stores already made unconditionally before the merge are
+not demoted.  Validated by nine fixed branch-merge cases including the
+original seed-2 template plus fuzz seeds 1-3 x8k and the full suite.
+
 ## Roadmap
 
 1. **Parser** (`jutsu/parser.py` -> rust): done; wired into `Parser.parse`

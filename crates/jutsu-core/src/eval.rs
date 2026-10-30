@@ -128,6 +128,27 @@ const OC_LOAD: u8 = 0;
 const OC_STORE: u8 = 1;
 const OC_PARAM: u8 = 2;
 
+/// One occurrence collected in a scope region.  `Branch` marks an `if`
+/// statement: its test occurrences were already pushed before this entry,
+/// the branch groups carry the occurrences that belong to the per-branch
+/// symbol copies (`Symbols.copy`) which get merged with `branch_update`.
+#[derive(Clone)]
+enum Occ {
+    One(String, u8),
+    Branch {
+        body: Vec<Occ>,
+        elifs: Vec<Occ>,
+        els: Vec<Occ>,
+    },
+}
+
+/// The per-region symbol state mirrored from `idtracking.Symbols`.
+#[derive(Clone)]
+struct Sym {
+    refs: HashMap<String, IK>,
+    stores: std::collections::HashSet<String>,
+}
+
 impl<'py> Ev<'py> {
     fn new(
         py: Python<'py>,
@@ -643,7 +664,7 @@ other => Err(nope(other.to_string())),
     // python context at each entry.
 
     /// FrameSymbolVisitor-style symbol walk over one region.
-    fn walk_fsf(&self, av: &Av, occs: &mut Vec<(String, u8)>) {
+    fn walk_fsf(&self, av: &Av, occs: &mut Vec<Occ>) {
         match av {
             Av::List(inner) | Av::Tuple(inner) => {
                 for a in inner {
@@ -662,13 +683,47 @@ other => Err(nope(other.to_string())),
                         Some("param") => OC_PARAM,
                         _ => return,
                     };
-                    occs.push((n.to_string(), kind));
+                    occs.push(Occ::One(n.to_string(), kind));
                 }
             }
             Av::Node("NSRef", _, a) => {
                 if let Some(n) = arg_str(&a[0]) {
-                    occs.push((n.to_string(), OC_LOAD));
+                    occs.push(Occ::One(n.to_string(), OC_LOAD));
                 }
+            }
+            // `if` statements split the region into per-branch symbol copies;
+            // the test applies to the current state before the copies exist.
+            Av::Node("If", _, a) => {
+                if a.len() > 0 {
+                    self.walk_fsf(&a[0], occs);
+                }
+                let mut body: Vec<Occ> = Vec::new();
+                let mut elifs: Vec<Occ> = Vec::new();
+                let mut els: Vec<Occ> = Vec::new();
+                if a.len() > 1 {
+                    if let Av::List(b) = &a[1] {
+                        for it in b {
+                            self.walk_fsf(it, &mut body);
+                        }
+                    }
+                }
+                if a.len() > 2 {
+                    if let Av::List(es) = &a[2] {
+                        for e in es {
+                            // each elif is itself an If node: its test joins
+                            // the evolving chain state, then it nests
+                            self.walk_fsf(e, &mut elifs);
+                        }
+                    }
+                }
+                if a.len() > 3 {
+                    if let Av::List(os) = &a[3] {
+                        for it in os {
+                            self.walk_fsf(it, &mut els);
+                        }
+                    }
+                }
+                occs.push(Occ::Branch { body, elifs, els });
             }
             // visiting stops at nested hard scopes
             Av::Node("Scope" | "Block" | "OverlayScope", _, _) => {}
@@ -715,7 +770,7 @@ other => Err(nope(other.to_string())),
             }
             Av::Node("Macro", _, a) => {
                 if let Some(n) = a.first().and_then(|x| arg_str(x)) {
-                    occs.push((n.to_string(), OC_STORE));
+                    occs.push(Occ::One(n.to_string(), OC_STORE));
                 }
             }
             Av::Node("Import", _, a) => {
@@ -724,7 +779,7 @@ other => Err(nope(other.to_string())),
                 }
                 if a.len() > 1 {
                     if let Some(n) = arg_str(&a[1]) {
-                        occs.push((n.to_string(), OC_STORE));
+                        occs.push(Occ::One(n.to_string(), OC_STORE));
                     }
                 }
             }
@@ -736,11 +791,11 @@ other => Err(nope(other.to_string())),
                     if let Av::List(names) = &a[1] {
                         for nm in names {
                             match nm {
-                                Av::Str(s) => occs.push((s.clone(), OC_STORE)),
+                                Av::Str(s) => occs.push(Occ::One(s.clone(), OC_STORE)),
                                 Av::Tuple(t) => {
                                     if t.len() > 1 {
                                         if let Some(x) = arg_str(&t[1]) {
-                                            occs.push((x.to_string(), OC_STORE));
+                                            occs.push(Occ::One(x.to_string(), OC_STORE));
                                         }
                                     }
                                 }
@@ -759,30 +814,94 @@ other => Err(nope(other.to_string())),
         }
     }
 
-    /// First-occurrence-wins rules turning occurrences into slot kinds.
-    fn build_kinds(&self, occs: &[(String, u8)], ancestors: &[String]) -> HashMap<String, IK> {
-        let mut own: HashMap<String, IK> = HashMap::new();
-        for (name, kind) in occs {
-            match *kind {
-                OC_PARAM => {
-                    own.insert(name.clone(), IK::Param);
+    /// Turn collected occurrences into slot kinds, mirroring `idtracking`
+    /// exactly: unconditional visits apply to the region state; each `if`
+    /// statement evaluates its branch groups against independent copies of the
+    /// state and merges them with `branch_update` -- names stored inside
+    /// branches (and not already stored unconditionally) become RESOLVE
+    /// loads (or ALIAS when an ancestor owns them), never UNDEFINED slots.
+    fn build_kinds(&self, occs: &[Occ], ancestors: &[String]) -> HashMap<String, IK> {
+        let mut sym = Sym { refs: HashMap::new(), stores: std::collections::HashSet::new() };
+        self.apply_occs(occs, &mut sym, ancestors);
+        sym.refs
+    }
+
+    fn apply_occs(&self, occs: &[Occ], sym: &mut Sym, ancestors: &[String]) {
+        for oc in occs {
+            match oc {
+                Occ::One(name, kind) => {
+                    self.apply_one(name, *kind, sym, ancestors);
                 }
-                OC_STORE => {
-                    if !own.contains_key(name) {
-                        let k = if ancestors.iter().any(|a| a == name) {
-                            IK::Alias
-                            } else { IK::Undef };
-                        own.insert(name.clone(), k);
-                    }
-                }
-                _ => {
-                    if !own.contains_key(name) && !ancestors.iter().any(|a| a == name) {
-                        own.insert(name.clone(), IK::Resolve);
-                    }
+                Occ::Branch { body, elifs, els } => {
+                    // inner_visit(): each branch gets a copy of the state
+                    let mut bs = sym.clone();
+                    self.apply_occs(body, &mut bs, ancestors);
+                    // the elif chain evolves on its own copy (each nested If
+                    // merges into it as it is visited)
+                    let mut es = sym.clone();
+                    self.apply_occs(elifs, &mut es, ancestors);
+                    let mut os = sym.clone();
+                    self.apply_occs(els, &mut os, ancestors);
+                    Self::branch_update(sym, [bs, es, os], ancestors);
                 }
             }
         }
-        own
+    }
+
+    fn apply_one(&self, name: &str, kind: u8, sym: &mut Sym, ancestors: &[String]) {
+        match kind {
+            OC_PARAM => {
+                // declare_parameter always re-defines the reference
+                sym.stores.insert(name.to_string());
+                sym.refs.insert(name.to_string(), IK::Param);
+            }
+            OC_STORE => {
+                sym.stores.insert(name.to_string());
+                if !sym.refs.contains_key(name) {
+                    let k = if ancestors.iter().any(|a| a == name) {
+                        IK::Alias
+                    } else {
+                        IK::Undef
+                    };
+                    sym.refs.insert(name.to_string(), k);
+                }
+            }
+            _ => {
+                // load: only defines when no reference exists anywhere in the
+                // symbol chain (own refs plus the ancestor scope names)
+                if !sym.refs.contains_key(name) && !ancestors.iter().any(|a| a == name) {
+                    sym.refs.insert(name.to_string(), IK::Resolve);
+                }
+            }
+        }
+    }
+
+    fn branch_update<const N: usize>(sym: &mut Sym, branches: [Sym; N], ancestors: &[String]) {
+        // stores = union(branch.stores) - self.stores
+        let mut stores: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for b in &branches {
+            for s in &b.stores {
+                if !sym.stores.contains(s) {
+                    stores.insert(s.clone());
+                }
+            }
+        }
+        // merge refs/loads/stores in branch order (later definitions win)
+        for b in &branches {
+            for (name, k) in &b.refs {
+                sym.refs.insert(name.clone(), *k);
+            }
+            sym.stores.extend(b.stores.iter().cloned());
+        }
+        // stored-inside-a-branch names resolve rather than stay undefined
+        for name in stores {
+            let k = if ancestors.iter().any(|a| a == &name) {
+                IK::Alias
+            } else {
+                IK::Resolve
+            };
+            sym.refs.insert(name, k);
+        }
     }
 
     fn init_scope(&self, kinds: &HashMap<String, IK>) -> ERes<Scope<'py>> {
@@ -839,7 +958,7 @@ other => Err(nope(other.to_string())),
             Some(Av::List(l)) => l,
             _ => return Err(nope("bad template body")),
         };
-        let mut occs: Vec<(String, u8)> = Vec::new();
+        let mut occs: Vec<Occ> = Vec::new();
         for it in items {
             self.walk_fsf(it, &mut occs);
         }
@@ -1130,7 +1249,7 @@ other => Err(nope(other.to_string())),
         }
         // analyze_node order first (the filter expression), body afterwards;
         // later occurrences never override an existing slot decision.
-        let mut occs: Vec<(String, u8)> = Vec::new();
+        let mut occs: Vec<Occ> = Vec::new();
         self.walk_fsf(&args[1], &mut occs);
         for it in body {
             self.walk_fsf(it, &mut occs);
@@ -1176,7 +1295,7 @@ other => Err(nope(other.to_string())),
         // analyze_node order: target first (RootVisitor.visit_AssignBlock),
         // then the body as it is emitted; the filter expression registers its
         // loads last.
-        let mut occs: Vec<(String, u8)> = Vec::new();
+        let mut occs: Vec<Occ> = Vec::new();
         self.walk_fsf(&args[0], &mut occs);
         for it in body {
             self.walk_fsf(it, &mut occs);
@@ -1207,7 +1326,7 @@ other => Err(nope(other.to_string())),
     /// `test_kinds` -- merging them would let a body store shadow the very
     /// name the test resolves from the context.
     fn loop_kinds(&self, args: &[Av]) -> ERes<(HashMap<String, IK>, bool)> {
-        let mut occs: Vec<(String, u8)> = Vec::new();
+        let mut occs: Vec<Occ> = Vec::new();
         self.walk_fsf(&args[0], &mut occs);
         let body = match &args[2] {
             Av::List(b) => b,
@@ -1230,7 +1349,7 @@ other => Err(nope(other.to_string())),
     /// the stack so that loads resolve from context and never see a body
     /// store of the same name.
     fn test_kinds(&self, args: &[Av]) -> ERes<HashMap<String, IK>> {
-        let mut occs: Vec<(String, u8)> = Vec::new();
+        let mut occs: Vec<Occ> = Vec::new();
         self.walk_fsf(&args[0], &mut occs);
         self.walk_fsf(&args[4], &mut occs);
         let ancestors = self.owned_union();
@@ -1329,7 +1448,7 @@ other => Err(nope(other.to_string())),
             }
         }
         if !else_list.is_empty() && !ran {
-            let mut occs: Vec<(String, u8)> = Vec::new();
+            let mut occs: Vec<Occ> = Vec::new();
             for it in else_list.iter() {
                 self.walk_fsf(it, &mut occs);
             }
@@ -1382,7 +1501,7 @@ other => Err(nope(other.to_string())),
             _ => return Err(nope("bad for else")),
         };
         if !else_list.is_empty() && !ran {
-            let mut occs: Vec<(String, u8)> = Vec::new();
+            let mut occs: Vec<Occ> = Vec::new();
             for it in else_list.iter() {
                 self.walk_fsf(it, &mut occs);
             }
@@ -1515,7 +1634,7 @@ other => Err(nope(other.to_string())),
             Av::List(b) => b,
             _ => return Err(nope("bad with body")),
         };
-        let mut occs: Vec<(String, u8)> = Vec::new();
+        let mut occs: Vec<Occ> = Vec::new();
         for t in targets.iter() {
             self.walk_fsf(t, &mut occs);
         }

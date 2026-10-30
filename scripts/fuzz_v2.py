@@ -73,10 +73,11 @@ def run(seed, n):
         else:
             stats[p[0]] = stats.get(p[0], 0) + 1
     print(f"seed={seed} n={n}", stats, "DIFFS:", len(diffs))
-    for src, p, r in diffs[:8]:
-        print("---", repr(src)[:200])
-        print("   py :", p)
-        print("   rst:", r)
+    if diffs:
+        with open("scripts/mismatch.txt", "a") as fh:
+            for src, p, r in diffs:
+                fh.write(f"seed={seed}\nPY={p!r}\nRST={r!r}\n---\n{src}\n===\n")
+        print("full sources written to scripts/mismatch.txt")
     return len(diffs)
 
 

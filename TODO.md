@@ -77,6 +77,16 @@ criterion.
       block inheritance and includes (next slices C-v3/C-v4).
 * [ ] block inheritance machinery (super(), blocks dict, scoped blocks,
       required blocks) ported onto the interpreter
+* [X] known gap fixed (found by fuzz seed 2, recorded in `scripts/mismatch.txt`):
+      symbol occurrence merging across if-branches.  The occurrence walk now
+      collects structured occurrences (`Occ::Branch` groups per `if`), and the
+      kind builder evaluates branch groups against independent copies of the
+      region state and merges them exactly like `Symbols.copy` /
+      `branch_update`: names stored inside branches (and not already stored
+      unconditionally) become RESOLVE loads (ALIAS when an ancestor owns them)
+      instead of UNDEFINED slots; the elif chain evolves on its own copy;
+      nested ifs recurse.  Validated: 9 fixed branch-merge cases incl. the
+      original seed-2 template, fuzz seeds 1-3 x8k green, full suite green.
 * [X] follow-up fix: the for-loop `if=` test evaluates in its own frame (the
       generated filter function) -- loads resolve from the context and never
       observe body stores of the same name; unpack-of-undefined parity

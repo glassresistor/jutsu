@@ -512,3 +512,81 @@ def test_autoescape_falls_back():
     env = Environment(autoescape=True)
     for src in ["{{ '<b>' }}", "{{ 'a' ~ '<b>' }}", "static {{ x }} dyn"]:
         assert rust_eval.evaluate(env, src, variables={"x": "<y>"}) is None, src
+
+
+class Obj:
+    def __init__(self):
+        self.bar = 7
+
+    def __call__(self, x=1):
+        return f"called:{x}"
+
+
+def test_branch_store_resolves_from_context():
+    """Regression (known gap from fuzz seed 2): names stored only inside an
+    if branch must become RESOLVE loads at the merge point -- the code
+    generator's ``Symbols.copy``/``branch_update`` -- never undefined slots:
+    a store that may not have executed cannot shadow the context value.
+    """
+    from jutsu.runtime import Namespace
+    env = Environment()
+    vars_ = {
+        "x": "hello",
+        "b": [1, 2, 3],
+        "ns": Namespace(),
+        "foo": Obj(),
+        "xs": [1, -2],
+    }
+    cases = [
+        # store in a branch that never runs -> load sees the context value
+        "{% if x %}{% set q = 1 %}{% else %}{% set b = 9 %}{% endif %}|{{ b }}",
+        # store in the branch that runs -> load sees the stored value
+        "{%- if x %} {% set b = 9 %} {%- else %}{% set b = 8 %}{% endif %}|{{ b }}",
+        # load in one branch, store in another
+        "{% if x %}{{ b }}{% else %}{% set b = 9 %}{% endif %}",
+        # elif chain: stores evolve on the chain copy
+        "{% if false %}{% set b = 1 %}{% elseif x %}{% set b = 8 %}"
+        "{% else %}{% set z = 7 %}{% endif %}|{{ b }}|{{ z }}".replace("elseif", "elif"),
+        # nested if inside a branch, load after the inner merge
+        "{% if x %}{% if y %}{% set b = 1 %}{% endif %}{{ b }}"
+        "{% else %}{% endif %}",
+        # set-block store inside a dead branch
+        "{% if x %}{% else %}{% set b %}q{% endset %}{% endif %}|{{ b }}",
+        # two consecutive ifs storing the same name (merge must not demote)
+        "{% if x %}{% set b = 1 %}{% endif %}{% if false %}{% set b = 2 %}"
+        "{% endif %}|{{ b }}",
+        # branch store inside a loop body scope
+        "{% for i in xs %}{% if i > 0 %}{% set b = i %}{% endif %}{{ b }}{% endfor %}",
+    ]
+    for src in cases:
+        p = _py_pair(env, src, vars_)
+        r = _rust_pair(env, src, vars_)
+        assert r[0] != "fallback", f"unsupported: {src!r}"
+        assert r == p, f"{src!r}: {r} != {p}"
+
+
+def test_branch_merge_full_fuzz_case():
+    """The exact fuzz seed-2 template that exposed the branch_update gap:
+    a set-block target inside a dead else branch plus a later root store of
+    the same names; python raises TypeError on the namespace subscript, the
+    rust evaluator used to report an undefined ``b`` instead.
+    """
+    from jutsu.runtime import Namespace
+    env = Environment()
+    vars_ = {
+        "a": {"b": 2, "c": "s", "attr": 1},
+        "b": [1, 2, 3],
+        "x": "hello",
+        "ns": Namespace(),
+        "foo": Obj(),
+    }
+    src = (
+        "{% if x is defined%}{% else %}{% set (a, b) %}{% endset %}"
+        "{% for a in x.y%}{% endfor %}{% endif %}| |"
+        "{% set ((a, b), c) = ns[[true, True, None]:{0.2349 : -1.2891, "
+        "3 : true}:b.foo].bar.bar >= foo(x=1) != \"quote\" 'its'%}"
+    )
+    p = _py_pair(env, src, vars_)
+    r = _rust_pair(env, src, vars_)
+    assert r[0] != "fallback", f"unsupported: {src!r}"
+    assert r == p, f"{src!r}: {r} != {p}"
