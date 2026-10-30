@@ -24,8 +24,8 @@ the existing Jinja2 extensions and ecosystem.
 | Rust lexer (`crates/jutsu-core/src/lexer.rs`) | **done and wired into `Lexer.tokeniter`** |
 | Rust parser (`crates/jutsu-core/src/parser.rs`) | **done and wired into `Parser.parse`** (default on; `JUTSU_RUST_PARSER=0` switches back) |
 | Packaging (maturin wheel with rust core) | done (`maturin build -r -m crates/jutsu-core/Cargo.toml`) |
-| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | **slice C-v2: statements + scoping evaluate fully in rust** -- if/elif/else, for (incl. `if=` test filters, else branches, recursive loops with `loop()` recursion, full LoopContext features), set/set-block(+filter), with, namespace refs; compiled-engine scope semantics reproduced (slot frames, alias-copy on store, per-scope resolve loads, root writeback+exported_vars). Not wired into `Template.render` yet; validated differentially incl. exception type/message parity |
-| Code generator / runtime | still python (next targets: statements C-v2..) |
+| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | **slice C-v2/C-v3a: statements + scoping evaluate fully in rust** -- if/elif/else, for (incl. `if=` test filters, else branches, recursive loops with `loop()` recursion, full LoopContext features), set/set-block(+filter), filter blocks, with, namespace refs; compiled-engine scope semantics reproduced (slot frames, alias-copy on store, per-scope resolve loads, root writeback+exported_vars). Not wired into `Template.render` yet; validated differentially incl. exception type/message parity |
+| Code generator / runtime | still python (next targets: macros/call-blocks, block inheritance, includes) |
 
 The lexer port is validated three ways:
 
@@ -144,6 +144,15 @@ zero mismatches.  Deferred on purpose: macros, filter/call blocks, block
 inheritance and includes (dedicated slices C-v3/C-v4), dynamic call arguments,
 autoescape/Markup, environment finalize functions and volatile eval contexts
 -- all reported as unsupported so callers fall back to the python engine.
+
+Slice C-v3a adds filter blocks: body renders into a buffer inside its own
+scope frame, the implicit filter target receives the joined buffer and the
+chain is applied through `_filter_test_common`, then the result goes through
+the normal output finalize.  The symbol-occurrence order follows
+`analyze_node` (filter expression before body) for both filter blocks and set
+blocks; loop frames analyze target+body before the test expression registers
+its loads -- matching when a later occurrence must not override an earlier
+decision.
 
 ## Roadmap
 

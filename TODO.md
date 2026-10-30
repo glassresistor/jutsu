@@ -77,7 +77,14 @@ criterion.
       block inheritance and includes (next slices C-v3/C-v4).
 * [ ] block inheritance machinery (super(), blocks dict, scoped blocks,
       required blocks) ported onto the interpreter
-* [ ] macro + filter-block semantics, `caller()` / CallBlock closures
+* [X] slice C-v3a: filter-block semantics (buffered body in its own scope
+      frame, implicit filter target = joined buffer, chain via
+      `_filter_test_common`, result finalized with `str`); occurrence order
+      fixed to match `analyze_node` for filter/set blocks and for loops.
+      Namespace objects already covered in C-v2.
+* [ ] macro + call-block semantics (`caller()` closures, varargs/kwargs,
+      Macro wrapper object) -- needs callable rust closures or a python-side
+      helper class; deferred to the next slice.
 * [ ] `with`/autoescape scope modifiers via ScopedEvalContextModifier
 * [ ] performance pass: avoid pyo3 round-trips for hot attribute lookups where
       safe; measure against python-compiled baseline and only keep wins.

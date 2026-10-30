@@ -70,7 +70,6 @@ UNSUPPORTED = [
     "{{ f(**kw) }}",
     "{{ f(a, *b, **c) }}",
     "{% macro m(a) %}x{% endmacro %}",
-    "{% filter upper %}hi{% endfilter %}",
     "{% block b %}B{% endblock %}",
     "{% extends 'x' %}",
     "{% include 'x' %}",
@@ -450,6 +449,32 @@ def test_structured_statements(n=4000, seed=201):
     assert ok > 300, f"only {ok} successful renders"
     assert exc > 100, f"only {exc} runtime errors compared"
     print(f"structured statements: ok={ok} exc={exc} fb={fb}")
+
+
+# ---------------------------------------------------------------------------
+# slice C-v3 part 1: filter blocks
+
+V3_CASES = [
+    ("{% filter upper %}hi {{'x'}}{% endfilter %}", {}, "HI X"),
+    ("{% filter join('') %}a{{ 'b' }}c{% endfilter %}", {}, "abc"),
+    ("{% filter upper|replace('I','Y') %}hi{% endfilter %}", {}, "HY"),
+    ("{% filter upper|lower %}hI{% endfilter %}", {}, "hi"),
+    ("{% for i in [1,2] %}{% filter join('') %}a{{i}}{% endfilter %}"
+     " {% endfor %}", {}, None),
+    ("{% set q = 1 %}{% filter join('') %}{% set q = 'z' %}{{q}}"
+     "{% endfilter %}|{{ q }}|", {}, None),
+]
+
+
+def test_v3_cases():
+    env = Environment()
+    for src, vars_, want in V3_CASES:
+        p = _py_pair(env, src, vars_)
+        r = _rust_pair(env, src, vars_)
+        assert r[0] != "fallback", f"v3 case unsupported: {src!r}"
+        assert r == p, f"{src!r}: {r} != {p}"
+        if want is not None:
+            assert r[1] == want, f"{src!r}: {r[1]!r} != {want!r}"
 
 
 def test_autoescape_falls_back():

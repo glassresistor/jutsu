@@ -65,7 +65,16 @@ The compiler port has two candidate strategies:
       Validated: 40 fixed cases + 12k structured statement templates (3 seeds)
       with exception type/message parity; perf: rust parse+eval 129 us vs
       python compile+render 770 us cold, cached python render 6.2 us.
-* [ ] C-v3: macro, filter blocks, call blocks/caller, namespace objects.
+* [X] C-v3a: filter blocks implemented (buffered body in its own scope frame,
+      implicit filter target receives the joined buffer, chain applied via
+      `_filter_test_common`, result finalized with `str`); namespace refs were
+      already covered.  Occurrence-collection order corrected to follow
+      `analyze_node`: set-blocks analyze the target first, filter blocks the
+      filter expression first, for loops analyze target+body before the test
+      expression registers loads.
+* [ ] C-v3b: macros and call blocks/caller closures (Macro wrapper object,
+      varargs/kwargs, derived contexts); needs callable rust closures or a
+      python-side helper class wrapping rust state.
 * [ ] C-v4: block inheritance + super(); `loop` in nested templates; error
       propagation parity (`TemplateRuntimeError`, tracebacks via debug.py --
       likely keep python-side wrapping).

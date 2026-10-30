@@ -119,8 +119,8 @@ pub const SUPPORTED_NODES: &[&str] = &[
     "Const", "TemplateData", "Name", "Getattr", "Getitem", "Tuple", "List", "Dict",
     "Pair", "CondExpr", "Or", "And", "Not", "Compare", "Operand", "Concat", "Call",
     "Filter", "Test", "Add", "Sub", "Mul", "Div", "FloorDiv", "Mod", "Pow", "Pos",
-    "Neg", "Slice", "Keyword", "Output", "If", "Assign", "AssignBlock", "For",
-    "With", "NSRef", "Template",
+    "Neg", "Slice", "Keyword", "Output", "If", "Assign", "AssignBlock", "FilterBlock",
+    "For", "With", "NSRef", "Template",
 ];
 
 /// Occurrence kinds collected by the scope symbol walk.
@@ -929,6 +929,7 @@ other => Err(nope(other.to_string())),
                 self.store_assign(&args[0], val)
             }
             "AssignBlock" => self.exec_assign_block(args),
+            "FilterBlock" => self.exec_filter_block(args, out),
             "For" => self.exec_for(args, out),
             "With" => self.exec_with(args, out),
             _ => Err(nope(format!("{name} statement outside the subset"))),
@@ -1107,6 +1108,49 @@ other => Err(nope(other.to_string())),
         }
     }
 
+    /// `{% filter x %}body{% endfilter %}`: body renders into a buffer inside
+    /// its own scope frame, the implicit filter target receives the joined
+    /// buffer and the chain is applied, then the result goes through the
+    /// normal output finalize (`str`), mirroring start_write/end_write.  A
+    /// filter block without a filter expression cannot be built by the parser.
+    fn exec_filter_block(
+        &self,
+        args: &[Av],
+        out: &mut Vec<Bound<'py, PyAny>>,
+    ) -> ERes<()> {
+        if args.len() < 2 {
+            return Err(nope("bad filter block"));
+        }
+        let body = match args.first() {
+            Some(Av::List(b)) => b,
+            _ => return Err(nope("bad filter block body")),
+        };
+        if matches!(&args[1], Av::NoneV) {
+            return Err(nope("filter block without filter"));
+        }
+        // analyze_node order first (the filter expression), body afterwards;
+        // later occurrences never override an existing slot decision.
+        let mut occs: Vec<(String, u8)> = Vec::new();
+        self.walk_fsf(&args[1], &mut occs);
+        for it in body {
+            self.walk_fsf(it, &mut occs);
+        }
+        let ancestors = self.owned_union();
+        let kinds = self.build_kinds(&occs, &ancestors);
+        self.enter_scope(&kinds)?;
+        let mut buf: Vec<Bound<'py, PyAny>> = Vec::new();
+        let res = self.exec_items(body, &mut buf);
+        if let Err(e) = res {
+            return Err(e);
+        }
+        let lst = PyList::new(self.py, &buf)?;
+        let value = self.env.call_method1("concat", (&lst,))?;
+        let applied = self.eval_filter_hole(&args[1], &value)?;
+        self.pop_scope();
+        out.push(self.out_str(&applied)?);
+        Ok(())
+    }
+
     fn eval_filter_hole(&self, av: &Av, hole: &Bound<'py, PyAny>) -> ERes<Bound<'py, PyAny>> {
         match av {
             Av::Node("Filter", _, a) => {
@@ -1129,9 +1173,16 @@ other => Err(nope(other.to_string())),
             Av::List(b) => b,
             _ => return Err(nope("bad assign block body")),
         };
+        // analyze_node order: target first (RootVisitor.visit_AssignBlock),
+        // then the body as it is emitted; the filter expression registers its
+        // loads last.
         let mut occs: Vec<(String, u8)> = Vec::new();
+        self.walk_fsf(&args[0], &mut occs);
         for it in body {
             self.walk_fsf(it, &mut occs);
+        }
+        if !matches!(&args[1], Av::NoneV) {
+            self.walk_fsf(&args[1], &mut occs);
         }
         let ancestors = self.owned_union();
         let kinds = self.build_kinds(&occs, &ancestors);
@@ -1150,20 +1201,22 @@ other => Err(nope(other.to_string())),
         self.store_assign(&args[0], value)
     }
 
-    /// Shared loop scope analysis for a `for` node: target params, test and
-    /// body occurrences.
+    /// Shared loop scope analysis for a `for` node: analyze_node visits the
+    /// target (as parameters) and the body first; the test expression only
+    /// contributes loads afterwards (during emission), so it never overrides
+    /// a decision made by an earlier occurrence.
     fn loop_kinds(&self, args: &[Av]) -> ERes<(HashMap<String, IK>, bool)> {
         let mut occs: Vec<(String, u8)> = Vec::new();
         self.walk_fsf(&args[0], &mut occs);
-        if !matches!(&args[4], Av::NoneV) {
-            self.walk_fsf(&args[4], &mut occs);
-        }
         let body = match &args[2] {
             Av::List(b) => b,
             _ => return Err(nope("bad for body")),
         };
         for it in body {
             self.walk_fsf(it, &mut occs);
+        }
+        if !matches!(&args[4], Av::NoneV) {
+            self.walk_fsf(&args[4], &mut occs);
         }
         let ancestors = self.owned_union();
         let mut kinds = self.build_kinds(&occs, &ancestors);
