@@ -11,12 +11,17 @@
 //! volatile eval contexts, environment finalize functions -- is reported as
 //! unsupported so callers fall back to the python engine.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use pyo3::IntoPyObjectExt;
 
 use crate::parser::Av;
 use crate::pyrepr::py_repr_str;
+
+pyo3::import_exception!(jutsu.exceptions, TemplateRuntimeError);
 
 /// Bail-out from an evaluation attempt.
 pub enum EvalErr {
@@ -74,7 +79,54 @@ pub struct Ev<'py> {
     slice_cls: Bound<'py, PyAny>,
     autoescape: bool,
     name: Option<String>,
+    /// The `runtime.missing` sentinel.
+    missing: Bound<'py, PyAny>,
+    /// `environment.undefined`, the undefined factory used at load sites.
+    undef: Bound<'py, PyAny>,
+    /// `runtime.LoopContext` class.
+    loopctx: Bound<'py, PyAny>,
+    /// `runtime.Namespace` class.
+    ns: Bound<'py, PyAny>,
+    /// Live scope frames, innermost last.
+    stack: RefCell<Vec<Scope<'py>>>,
+    /// Loop contexts created for recursive loops, awaiting recursive calls.
+    rec: RefCell<Vec<RecEntry>>
 }
+
+/// One runtime scope frame: slots by name; `None` is the `missing` sentinel.
+struct Scope<'py> {
+    slots: HashMap<String, Option<Bound<'py, PyAny>>>,
+}
+
+/// How a slot is initialized when its scope is entered (mirrors the code
+/// generator's load instructions ALIAS / RESOLVE / UNDEFINED / PARAMETER).
+#[derive(Clone, Copy, PartialEq)]
+pub enum IK {
+    Param,
+    Alias,
+    Resolve,
+    Undef,
+}
+
+/// A loop context object created for a recursive `for` statement.
+struct RecEntry {
+    ptr: usize,
+    args: Vec<Av>,
+}
+
+/// Node names the evaluator understands (expressions plus C-v2 statements).
+pub const SUPPORTED_NODES: &[&str] = &[
+    "Const", "TemplateData", "Name", "Getattr", "Getitem", "Tuple", "List", "Dict",
+    "Pair", "CondExpr", "Or", "And", "Not", "Compare", "Operand", "Concat", "Call",
+    "Filter", "Test", "Add", "Sub", "Mul", "Div", "FloorDiv", "Mod", "Pow", "Pos",
+    "Neg", "Slice", "Keyword", "Output", "If", "Assign", "AssignBlock", "For",
+    "With", "NSRef", "Template",
+];
+
+/// Occurrence kinds collected by the scope symbol walk.
+const OC_LOAD: u8 = 0;
+const OC_STORE: u8 = 1;
+const OC_PARAM: u8 = 2;
 
 impl<'py> Ev<'py> {
     fn new(
@@ -106,6 +158,13 @@ impl<'py> Ev<'py> {
             Err(_) => return Err(nope("environment.tests is not a dict")),
         };
         let slice_cls = py.import("builtins")?.getattr("slice")?;
+        if !env.getattr("finalize")?.is_none() {
+            return Err(nope("environment finalize function"));
+        }
+        let missing = rt.getattr("missing")?;
+        let loopctx = rt.getattr("LoopContext")?;
+        let ns = rt.getattr("Namespace")?;
+        let undef = env.getattr("undefined")?;
         Ok(Ev {
             py,
             env,
@@ -117,12 +176,78 @@ impl<'py> Ev<'py> {
             slice_cls,
             autoescape,
             name,
+            missing,
+            undef,
+            loopctx,
+            ns,
+            stack: RefCell::new(Vec::new()),
+            rec: RefCell::new(Vec::new()),
         })
     }
 
 
-    fn resolve(&self, name: &str) -> ERes<Bound<'py, PyAny>> {
-        Ok(self.ctx.call_method1("resolve", (name,))?)
+    /// Raw context lookup: `Context.resolve_or_missing`, `None` for missing.
+    fn raw_resolve(&self, name: &str) -> Result<Option<Bound<'py, PyAny>>, PyErr> {
+        let rv = self.ctx.call_method1("resolve_or_missing", (name,))?;
+        if rv.is(&self.missing) {
+            Ok(None)
+        } else {
+            Ok(Some(rv))
+        }
+    }
+
+    /// Wrap a slot value for a load site: missing becomes a fresh undefined
+    /// created by the environment's factory, exactly like the generated
+    /// `(undefined(name='x') if l_0_x is missing else l_0_x)`.
+    fn wrap(&self, name: &str, v: Option<&Bound<'py, PyAny>>) -> ERes<Bound<'py, PyAny>> {
+        match v {
+            Some(x) => Ok(x.clone()),
+            None => {
+                let kw = PyDict::new(self.py);
+                kw.set_item("name", name)?;
+                Ok(self.undef.call((), Some(&kw))?)
+            }
+        }
+    }
+
+    /// Scope-aware name lookup for load sites: walk the scope chain from the
+    /// innermost frame; slots win, otherwise read from the python context.
+    fn lookup(&self, name: &str) -> ERes<Bound<'py, PyAny>> {
+        {
+            let frames = self.stack.borrow();
+            for frame in frames.iter().rev() {
+                if let Some(v) = frame.slots.get(name) {
+                    return self.wrap(name, v.as_ref());
+                }
+            }
+        }
+        let raw = self.raw_resolve(name)?;
+        self.wrap(name, raw.as_ref())
+    }
+
+    /// Names owned by any live scope (the compiled engine's `find_ref` set).
+    fn owned_union(&self) -> Vec<String> {
+        let frames = self.stack.borrow();
+        let mut out: Vec<String> = Vec::new();
+        for frame in frames.iter() {
+            for k in frame.slots.keys() {
+                if !out.contains(k) {
+                    out.push(k.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Value of the nearest owning slot for `name`, walking innermost first.
+    fn nearest_slot(&self, name: &str) -> Option<Option<Bound<'py, PyAny>>> {
+        let frames = self.stack.borrow();
+        for frame in frames.iter().rev() {
+            if let Some(v) = frame.slots.get(name) {
+                return Some(v.clone());
+            }
+        }
+        None
     }
 
     fn none(&self) -> Bound<'py, PyAny> {
@@ -247,6 +372,17 @@ impl<'py> Ev<'py> {
     /// filters and tests are reported as unsupported so the python engine
     /// decides whether that is a compile-time or a runtime error.
     fn filter_test(&self, na: &[Av], is_filter: bool) -> ERes<Bound<'py, PyAny>> {
+        if matches!(&na[0], Av::NoneV) {
+            return Err(nope("implicit filter block target"));
+        }
+        let value = self.node(&na[0])?;
+        self.filter_common(na, is_filter, value)
+    }
+
+    /// The shared body of a filter/test application.  `value` is the target
+    /// the pipeline attaches to it; `None` means the implicit target hole of
+    /// a filter/call block (the caller supplies the buffered content).
+    fn filter_common(&self, na: &[Av], is_filter: bool, value: Bound<'py, PyAny>) -> ERes<Bound<'py, PyAny>> {
         if na.len() < 6 {
             return Err(nope("bad filter/test node"));
         }
@@ -262,10 +398,6 @@ impl<'py> Ev<'py> {
             let kind = if is_filter { "filter" } else { "test" };
             return Err(nope(format!("missing {} {:?}", kind, name)));
         }
-        if matches!(&na[0], Av::NoneV) {
-            return Err(nope("implicit filter block target"));
-        }
-        let value = self.node(&na[0])?;
         // the target value is passed separately; `_filter_test_common` puts it
         // in front of the argument list itself.
         let (alist, kw) = match (&na[2], &na[3]) {
@@ -295,6 +427,18 @@ impl<'py> Ev<'py> {
             return Err(nope("dynamic call arguments"));
         }
         let func = self.node(&na[0])?;
+        // Recursive loop interception: calling a loop context created by a
+        // recursive `for` statement renders one recursion level in rust,
+        // mirroring the compiled engine's LoopContext.__call__ -> _recurse.
+        if let (Av::List(al), Av::List(kl)) = (&na[1], &na[2]) {
+            if kl.is_empty() && al.len() == 1 {
+                if let Some(entry) = self.rec_find(&func) {
+                    let arg = self.node(&al[0])?;
+                    let depth: i64 = func.getattr("depth")?.extract()?;
+                    return self.run_recursive(&entry, arg, depth);
+                }
+            }
+        }
         let (alist, kw) = match (&na[1], &na[2]) {
             (Av::List(a), Av::List(k)) => self.sig(a, k, Some(func.clone()))?,
             _ => return Err(nope("call argument lists")),
@@ -375,20 +519,6 @@ impl<'py> Ev<'py> {
         Ok((self.node(&args[0])?, self.node(&args[1])?))
     }
 
-    fn output_items(&self, items: &[Av]) -> ERes<Bound<'py, PyAny>> {
-        let mut chunks: Vec<Bound<PyAny>> = Vec::new();
-        for it in items {
-            match it {
-                Av::Node("TemplateData", _, td) => chunks.push(self.lit(&td[0])?),
-                _ => {
-                    let v = self.node(it)?;
-                    chunks.push(self.out_str(&v)?);
-                }
-            }
-        }
-        self.out_join(chunks)
-    }
-
     fn node(&self, av: &Av) -> ERes<Bound<'py, PyAny>> {
         let (name, lineno, args): (&str, Option<u32>, &[Av]) = match av {
             Av::Node(n, l, a) => (*n, *l, a),
@@ -407,7 +537,7 @@ impl<'py> Ev<'py> {
                 if args.len() < 2 || arg_str(&args[1]) != Some("load") {
                     return Err(nope("non-loading name reference"));
                 }
-                self.resolve(nm)
+                self.lookup(nm)
             }
             "Getattr" => {
                 let obj = self.node(&args[0])?;
@@ -497,31 +627,849 @@ impl<'py> Ev<'py> {
             }
             "Pos" => Ok(self.node(&args[0])?.pos()?),
             "Neg" => Ok(self.node(&args[0])?.neg()?),
-            "Output" => match &args[0] {
-                Av::List(items) => self.output_items(items),
-                _ => Err(nope("output items")),
-            },
-            "Template" => match &args[0] {
-                Av::List(items) => {
-                    let mut chunks: Vec<Bound<PyAny>> = Vec::new();
-                    for it in items {
-                        match it {
-                            Av::Node("Output", _, oa) => match &oa[0] {
-                                Av::List(inner) => chunks.push(self.output_items(inner)?),
-                                _ => return Err(nope("bad output node")),
-                            },
-                            Av::Node(other, _, _) => {
-                                return Err(nope(format!("{other} outside the subset")))
-                            }
-                            _ => return Err(nope("template body item")),
+other => Err(nope(other.to_string())),
+        }
+    }
+    // ---------------------------------------------------------------- C-v2 --
+    //
+    // Statement execution with compiled-engine scoping semantics.  Every hard
+    // scope (root, for-body, for-else, with, set-block body) owns a frame of
+    // slots.  Occurrences are collected in source order (the symbol visitor
+    // visits an assignment's expression before its target), and the first
+    // occurrence of a name decides how the slot initializes when the scope is
+    // entered: parameters are not loaded, stores alias-copy from the nearest
+    // owning ancestor slot or become `missing`, and loads only own a slot
+    // when no scope in the chain owns the name -- then they resolve from the
+    // python context at each entry.
+
+    /// FrameSymbolVisitor-style symbol walk over one region.
+    fn walk_fsf(&self, av: &Av, occs: &mut Vec<(String, u8)>) {
+        match av {
+            Av::List(inner) | Av::Tuple(inner) => {
+                for a in inner {
+                    self.walk_fsf(a, occs);
+                }
+            }
+            Av::Node("Name", _, a) => {
+                if a.len() >= 2 {
+                    let n = match arg_str(&a[0]) {
+                        Some(n) => n,
+                        None => return,
+                    };
+                    let kind = match arg_str(&a[1]) {
+                        Some("load") => OC_LOAD,
+                        Some("store") => OC_STORE,
+                        Some("param") => OC_PARAM,
+                        _ => return,
+                    };
+                    occs.push((n.to_string(), kind));
+                }
+            }
+            Av::Node("NSRef", _, a) => {
+                if let Some(n) = arg_str(&a[0]) {
+                    occs.push((n.to_string(), OC_LOAD));
+                }
+            }
+            // visiting stops at nested hard scopes
+            Av::Node("Scope" | "Block" | "OverlayScope", _, _) => {}
+            // only the outer expression of a nested construct belongs here
+            Av::Node("For", _, a) => {
+                if a.len() > 1 {
+                    self.walk_fsf(&a[1], occs);
+                }
+            }
+            Av::Node("CallBlock", _, a) => {
+                if !a.is_empty() {
+                    self.walk_fsf(&a[0], occs);
+                }
+            }
+            Av::Node("FilterBlock", _, a) => {
+                if a.len() > 1 && !matches!(&a[1], Av::NoneV) {
+                    self.walk_fsf(&a[1], occs);
+                }
+            }
+            Av::Node("Assign", _, a) => {
+                // the symbol visitor visits expression, then target
+                if a.len() > 1 {
+                    self.walk_fsf(&a[1], occs);
+                }
+                if !a.is_empty() {
+                    self.walk_fsf(&a[0], occs);
+                }
+            }
+            Av::Node("AssignBlock", _, a) => {
+                // body belongs to the inner block frame, target here
+                if !a.is_empty() {
+                    self.walk_fsf(&a[0], occs);
+                }
+            }
+            Av::Node("With", _, a) => {
+                // nested `with`: only its values belong to this scope
+                if a.len() > 1 {
+                    if let Av::List(vs) = &a[1] {
+                        for v in vs {
+                            self.walk_fsf(v, occs);
                         }
                     }
-                    self.out_join(chunks)
                 }
-                _ => Err(nope("template body")),
-            },
-            other => Err(nope(other.to_string())),
+            }
+            Av::Node("Macro", _, a) => {
+                if let Some(n) = a.first().and_then(|x| arg_str(x)) {
+                    occs.push((n.to_string(), OC_STORE));
+                }
+            }
+            Av::Node("Import", _, a) => {
+                if !a.is_empty() {
+                    self.walk_fsf(&a[0], occs);
+                }
+                if a.len() > 1 {
+                    if let Some(n) = arg_str(&a[1]) {
+                        occs.push((n.to_string(), OC_STORE));
+                    }
+                }
+            }
+            Av::Node("FromImport", _, a) => {
+                if !a.is_empty() {
+                    self.walk_fsf(&a[0], occs);
+                }
+                if a.len() > 1 {
+                    if let Av::List(names) = &a[1] {
+                        for nm in names {
+                            match nm {
+                                Av::Str(s) => occs.push((s.clone(), OC_STORE)),
+                                Av::Tuple(t) => {
+                                    if t.len() > 1 {
+                                        if let Some(x) = arg_str(&t[1]) {
+                                            occs.push((x.to_string(), OC_STORE));
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            Av::Node(_, _, a) => {
+                for x in a {
+                    self.walk_fsf(x, occs);
+                }
+            }
+            _ => {}
         }
+    }
+
+    /// First-occurrence-wins rules turning occurrences into slot kinds.
+    fn build_kinds(&self, occs: &[(String, u8)], ancestors: &[String]) -> HashMap<String, IK> {
+        let mut own: HashMap<String, IK> = HashMap::new();
+        for (name, kind) in occs {
+            match *kind {
+                OC_PARAM => {
+                    own.insert(name.clone(), IK::Param);
+                }
+                OC_STORE => {
+                    if !own.contains_key(name) {
+                        let k = if ancestors.iter().any(|a| a == name) {
+                            IK::Alias
+                            } else { IK::Undef };
+                        own.insert(name.clone(), k);
+                    }
+                }
+                _ => {
+                    if !own.contains_key(name) && !ancestors.iter().any(|a| a == name) {
+                        own.insert(name.clone(), IK::Resolve);
+                    }
+                }
+            }
+        }
+        own
+    }
+
+    fn init_scope(&self, kinds: &HashMap<String, IK>) -> ERes<Scope<'py>> {
+        let mut slots: HashMap<String, Option<Bound<'py, PyAny>>> = HashMap::new();
+        let names: Vec<String> = kinds.keys().cloned().collect();
+        for name in names {
+            let k = kinds[&name];
+            let v = match k {
+                IK::Param | IK::Undef => None,
+                IK::Resolve => self.raw_resolve(&name)?,
+                IK::Alias => match self.nearest_slot(&name) {
+                    Some(v) => v,
+                    None => None,
+                },
+            };
+            slots.insert(name, v);
+        }
+        Ok(Scope { slots })
+    }
+
+    fn enter_scope(&self, kinds: &HashMap<String, IK>) -> ERes<()> {
+        let sc = self.init_scope(kinds)?;
+        self.stack.borrow_mut().push(sc);
+        Ok(())
+    }
+
+    fn pop_scope(&self) {
+        self.stack.borrow_mut().pop();
+    }
+
+    /// True if a Name node loading `target` appears anywhere below (the
+    /// compiled engine's `find_undeclared`, without stop rules).
+    fn deep_name_load(&self, av: &Av, target: &str) -> bool {
+        match av {
+            Av::List(inner) | Av::Tuple(inner) => {
+                inner.iter().any(|a| self.deep_name_load(a, target))
+            }
+            Av::Node("Name", _, a) => {
+                a.len() >= 2
+                    && arg_str(&a[0]).map(|s| s == target).unwrap_or(false)
+                    && arg_str(&a[1]) == Some("load")
+            }
+            Av::Node(_, _, a) => a.iter().any(|x| self.deep_name_load(x, target)),
+            _ => false,
+        }
+    }
+
+    fn deep_name_load_in(&self, items: &[Av], target: &str) -> bool {
+        items.iter().any(|a| self.deep_name_load(a, target))
+    }
+
+    fn exec_template(&self, args: &[Av], out: &mut Vec<Bound<'py, PyAny>>) -> ERes<()> {
+        let items = match args.first() {
+            Some(Av::List(l)) => l,
+            _ => return Err(nope("bad template body")),
+        };
+        let mut occs: Vec<(String, u8)> = Vec::new();
+        for it in items {
+            self.walk_fsf(it, &mut occs);
+        }
+        let kinds = self.build_kinds(&occs, &[]);
+        self.enter_scope(&kinds)?;
+        self.exec_items(items, out)?;
+        self.pop_scope();
+        Ok(())
+    }
+
+    fn exec_items(&self, items: &[Av], out: &mut Vec<Bound<'py, PyAny>>) -> ERes<()> {
+        for it in items {
+            self.exec_one(it, out)?;
+        }
+        Ok(())
+    }
+
+    fn exec_one(&self, av: &Av, out: &mut Vec<Bound<'py, PyAny>>) -> ERes<()> {
+        let (name, args): (&str, &[Av]) = match av {
+            Av::Node(n, _, a) => (*n, a),
+            _ => return Err(nope("statement node expected")),
+        };
+        match name {
+            "Output" => {
+                let items = match args.first() {
+                    Some(Av::List(l)) => l,
+                    _ => return Err(nope("bad output node")),
+                };
+                for it in items {
+                    match it {
+                        Av::Node("TemplateData", _, td) => out.push(self.lit(&td[0])?),
+                        _ => {
+                            let v = self.node(it)?;
+                            out.push(self.out_str(&v)?);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            "If" => {
+                if args.len() < 4 {
+                    return Err(nope("bad if node"));
+                }
+                let mut chosen: Option<&Vec<Av>> = None;
+                let t = self.node(&args[0])?;
+                if t.is_truthy()? {
+                    if let Av::List(b) = &args[1] {
+                        chosen = Some(b);
+                    }
+                } else {
+                    if let Av::List(elifs) = &args[2] {
+                        for e in elifs {
+                            let (en, ea) = match parts(e) {
+                                Some(x) => x,
+                                None => return Err(nope("bad elif")),
+                            };
+                            if en != "If" || ea.len() < 4 {
+                                return Err(nope("bad elif node"));
+                            }
+                            let t2 = self.node(&ea[0])?;
+                            if t2.is_truthy()? {
+                                if let Av::List(b) = &ea[1] {
+                                    chosen = Some(b);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    if chosen.is_none() {
+                        if let Av::List(els) = &args[3] {
+                            if !els.is_empty() {
+                                chosen = Some(els);
+                            }
+                        }
+                    }
+                }
+                match chosen {
+                    Some(b) => self.exec_items(b, out),
+                    None => Ok(()),
+                }
+            }
+            "Assign" => {
+                if args.len() < 2 {
+                    return Err(nope("bad assign node"));
+                }
+                let val = self.node(&args[1])?;
+                self.store_assign(&args[0], val)
+            }
+            "AssignBlock" => self.exec_assign_block(args),
+            "For" => self.exec_for(args, out),
+            "With" => self.exec_with(args, out),
+            _ => Err(nope(format!("{name} statement outside the subset"))),
+        }
+    }
+
+    /// Collect stored names of an assignment target recursively.
+    fn target_names(&self, tgt: &Av, out: &mut Vec<String>) {
+        match tgt {
+            Av::Node("Name", _, a) => {
+                if let Some(n) = arg_str(&a[0]) {
+                    out.push(n.to_string());
+                }
+            }
+            Av::Node("Tuple" | "List", _, a) => {
+                if let Some(Av::List(items)) = a.first() {
+                    for i in items {
+                        self.target_names(i, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Store an assignment value into a target and perform the root-level
+    /// writeback into `context.vars` plus exported_vars bookkeeping.
+    fn store_assign(&self, tgt: &Av, val: Bound<'py, PyAny>) -> ERes<()> {
+        let mut names: Vec<String> = Vec::new();
+        self.target_names(tgt, &mut names);
+        self.store_target(tgt, &val, false)?;
+        if !names.is_empty() && self.stack.borrow().len() == 1 {
+            let vars = self.ctx.getattr("vars")?;
+            for name in &names {
+                if let Some(Some(vv)) = self.nearest_slot(name) {
+                    vars.set_item(name.as_str(), vv)?;
+                }
+            }
+            let public: Vec<String> = names
+                .iter()
+                .filter(|n| !n.starts_with('_'))
+                .cloned()
+                .collect();
+            if !public.is_empty() {
+                let ex = self.ctx.getattr("exported_vars")?;
+                let strs: Vec<Bound<'py, PyAny>> = public
+                    .iter()
+                    .map(|s| PyString::new(self.py, s).into_any())
+                    .collect();
+                let lst = PyList::new(self.py, &strs)?;
+                ex.call_method1("update", (&lst,))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Load a namespace base object raw: the compiled engine checks
+    /// `isinstance(ref, Namespace)` on the slot value itself.
+    fn load_raw_ns_base(&self, name: &str) -> ERes<Bound<'py, PyAny>> {
+        {
+            let frames = self.stack.borrow();
+            for frame in frames.iter().rev() {
+                if let Some(v) = frame.slots.get(name) {
+                    let kw = PyDict::new(self.py);
+                    kw.set_item("name", name)?;
+                    return Ok(match v {
+                        Some(x) => x.clone(),
+                        None => self.undef.call((), Some(&kw))?,
+                    });
+                }
+            }
+        }
+        let raw = self.raw_resolve(name)?;
+        let kw = PyDict::new(self.py);
+        kw.set_item("name", name)?;
+        Ok(match raw {
+            Some(x) => x,
+            None => self.undef.call((), Some(&kw))?,
+        })
+    }
+
+    fn store_target(&self, tgt: &Av, val: &Bound<'py, PyAny>, iter_style: bool) -> ERes<()> {
+        match tgt {
+            Av::Node("Name", _, a) => {
+                let name = match arg_str(&a[0]) {
+                    Some(s) => s,
+                    None => return Err(nope("name target")),
+                };
+                {
+                    let mut frames = self.stack.borrow_mut();
+                    for frame in frames.iter_mut().rev() {
+                        if frame.slots.contains_key(name) {
+                            frame.slots.insert(name.to_string(), Some(val.clone()));
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(nope(format!("store to unowned name {name:?}")))
+            }
+            Av::Node("NSRef", _, a) => {
+                let base = match arg_str(&a[0]) {
+                    Some(s) => s,
+                    None => return Err(nope("nsref base")),
+                };
+                let attr = match a.get(1).and_then(arg_str) {
+                    Some(s) => s,
+                    None => return Err(nope("nsref attr")),
+                };
+                let obj = self.load_raw_ns_base(base)?;
+                if !obj.is_instance(&self.ns)? {
+                    return Err(EvalErr::Exc(PyErr::new::<TemplateRuntimeError, _>(
+                        "cannot assign attribute on non-namespace object",
+                    )));
+                }
+                obj.set_item(attr, val)?;
+                Ok(())
+            }
+            Av::Node("Tuple" | "List", _, a) => {
+                let items = match a.first() {
+                    Some(Av::List(l)) => l,
+                    _ => return Err(nope("bad tuple/list target")),
+                };
+                if items.is_empty() {
+                    return Ok(());
+                }
+                let seq = self.unpack_seq(val, iter_style)?;
+                let nseq = seq.len();
+                if nseq != items.len() {
+                    return Err(EvalErr::Exc(self.unpack_error(items.len(), nseq)));
+                }
+                {
+                    for (t, v) in items.iter().zip(seq.iter()) {
+                        self.store_target(t, &v, iter_style)?;
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(nope("bad assignment target")),
+        }
+    }
+
+    /// Materialize a value for sequence unpacking.  `iter_style` selects the
+    /// message of python's `for` statement (`'int' object is not iterable`)
+    /// versus plain assignment (`cannot unpack non-iterable int object`).
+    fn unpack_seq(&self, val: &Bound<'py, PyAny>, iter_style: bool) -> ERes<Bound<'py, PyList>> {
+        let builtins = self.py.import("builtins")?;
+        let lst_fn = builtins.getattr("list")?;
+        match lst_fn.call1((val,)) {
+            Ok(l) => match l.downcast_into::<PyList>() {
+                Ok(p) => Ok(p),
+                Err(e) => Err(EvalErr::Exc(e.into())),
+            },
+            Err(_) => {
+                let tn: String = val.get_type().name()?.extract()?;
+                if iter_style {
+                    return Err(EvalErr::Exc(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        format!("'{tn}' object is not iterable"),
+                    )));
+                }
+                Err(EvalErr::Exc(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    format!("cannot unpack non-iterable {tn} object"),
+                )))
+            }
+        }
+    }
+
+    fn unpack_error(&self, need: usize, got: usize) -> PyErr {
+        if got < need {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "not enough values to unpack (expected {need}, got {got})"
+            ))
+        } else {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "too many values to unpack (expected {need})"
+            ))
+        }
+    }
+
+    fn eval_filter_hole(&self, av: &Av, hole: &Bound<'py, PyAny>) -> ERes<Bound<'py, PyAny>> {
+        match av {
+            Av::Node("Filter", _, a) => {
+                if matches!(&a[0], Av::NoneV) {
+                    self.filter_common(a, true, hole.clone())
+                } else {
+                    let inner = self.eval_filter_hole(&a[0], hole)?;
+                    self.filter_common(a, true, inner)
+                }
+            }
+            _ => self.node(av),
+        }
+    }
+
+    fn exec_assign_block(&self, args: &[Av]) -> ERes<()> {
+        if args.len() < 3 {
+            return Err(nope("bad assign block"));
+        }
+        let body = match &args[2] {
+            Av::List(b) => b,
+            _ => return Err(nope("bad assign block body")),
+        };
+        let mut occs: Vec<(String, u8)> = Vec::new();
+        for it in body {
+            self.walk_fsf(it, &mut occs);
+        }
+        let ancestors = self.owned_union();
+        let kinds = self.build_kinds(&occs, &ancestors);
+        self.enter_scope(&kinds)?;
+        let mut buf: Vec<Bound<'py, PyAny>> = Vec::new();
+        let res = self.exec_items(body, &mut buf);
+        if res.is_err() {
+            return Err(res.unwrap_err());
+        }
+        let lst = PyList::new(self.py, &buf)?;
+        let mut value = self.env.call_method1("concat", (&lst,))?;
+        if !matches!(&args[1], Av::NoneV) {
+            value = self.eval_filter_hole(&args[1], &value)?;
+        }
+        self.pop_scope();
+        self.store_assign(&args[0], value)
+    }
+
+    /// Shared loop scope analysis for a `for` node: target params, test and
+    /// body occurrences.
+    fn loop_kinds(&self, args: &[Av]) -> ERes<(HashMap<String, IK>, bool)> {
+        let mut occs: Vec<(String, u8)> = Vec::new();
+        self.walk_fsf(&args[0], &mut occs);
+        if !matches!(&args[4], Av::NoneV) {
+            self.walk_fsf(&args[4], &mut occs);
+        }
+        let body = match &args[2] {
+            Av::List(b) => b,
+            _ => return Err(nope("bad for body")),
+        };
+        for it in body {
+            self.walk_fsf(it, &mut occs);
+        }
+        let ancestors = self.owned_union();
+        let mut kinds = self.build_kinds(&occs, &ancestors);
+        let extended = args.len() > 5 && self.deep_name_load_in(body, "loop");
+        if extended {
+            kinds.insert("loop".to_string(), IK::Param);
+        }
+        Ok((kinds, extended))
+    }
+
+    fn exec_for(&self, args: &[Av], out: &mut Vec<Bound<'py, PyAny>>) -> ERes<()> {
+        if args.len() < 6 {
+            return Err(nope("bad for node"));
+        }
+        let recursive = match &args[5] {
+            Av::Bool(b) => *b,
+            _ => return Err(nope("bad recursive flag")),
+        };
+        if recursive {
+            let v = self.node(&args[1])?;
+            let res = self.run_recursive(args, v, 0)?;
+            let s = self.out_str(&res)?;
+            out.push(s);
+            return Ok(());
+        }
+        let (kinds, extended) = self.loop_kinds(args)?;
+        let has_test = !matches!(&args[4], Av::NoneV);
+        if extended && has_test {
+            // LoopContext would need to wrap the lazily filtered generator;
+            // eager filtering could reorder test vs body errors. Defer.
+            return Err(nope("extended loop with test filter"));
+        }
+        let iter_val = self.node(&args[1])?;
+        let else_list = match &args[3] {
+            Av::List(l) => l,
+            _ => return Err(nope("bad for else")),
+        };
+        let mut ran = false;
+        if extended {
+            let none = self.py.None();
+            let lc = self.loopctx.call1((&iter_val, &self.undef, none, 0i64))?;
+            let mut iterated = lc.try_iter()?;
+            while let Some(pair_r) = iterated.next() {
+                let (val, loopobj): (Bound<'py, PyAny>, Bound<'py, PyAny>) = pair_r?.extract()?;
+                self.enter_scope(&kinds)?;
+                self.store_target(&args[0], &val, false)?;
+                {
+                    if let Some(frame) = self.stack.borrow_mut().last_mut() {
+                        frame.slots.insert("loop".to_string(), Some(loopobj));
+                    }
+                }
+                self.exec_items(&body_of(args), out)?;
+                self.pop_scope();
+                ran = true;
+            }
+        } else if has_test {
+            // lazy filtering, interleaving test and body evaluation exactly
+            // like the generated filter function
+            let mut it = iter_val.try_iter()?;
+            while let Some(item_r) = it.next() {
+                let item: Bound<'py, PyAny> = item_r?;
+                self.enter_scope(&kinds)?;
+                self.store_target(&args[0], &item, false)?;
+                let t = self.node(&args[4])?;
+                if t.is_truthy()? {
+                    self.exec_items(&body_of(args), out)?;
+                    ran = true;
+                }
+                self.pop_scope();
+            }
+        } else {
+            let mut it = iter_val.try_iter()?;
+            while let Some(item_r) = it.next() {
+                let item: Bound<'py, PyAny> = item_r?;
+                self.enter_scope(&kinds)?;
+                self.store_target(&args[0], &item, false)?;
+                self.exec_items(&body_of(args), out)?;
+                self.pop_scope();
+                ran = true;
+            }
+        }
+        if !else_list.is_empty() && !ran {
+            let mut occs: Vec<(String, u8)> = Vec::new();
+            for it in else_list.iter() {
+                self.walk_fsf(it, &mut occs);
+            }
+            let ancestors = self.owned_union();
+            let kinds = self.build_kinds(&occs, &ancestors);
+            self.enter_scope(&kinds)?;
+            self.exec_items(else_list, out)?;
+            self.pop_scope();
+        }
+        Ok(())
+    }
+
+    fn run_recursive(
+        &self,
+        args: &[Av],
+        iterable: Bound<'py, PyAny>,
+        depth0: i64,
+    ) -> ERes<Bound<'py, PyAny>> {
+        let (kinds, _extended) = self.loop_kinds(args)?;
+        let none = self.py.None();
+        let lc = self.loopctx.call1((&iterable, &self.undef, none, depth0))?;
+        let lptr = lc.as_ptr() as usize;
+        self.rec.borrow_mut().push(RecEntry {
+            ptr: lptr,
+            args: args.to_vec(),
+        });
+        let body = body_of(args);
+        let mut buf: Vec<Bound<'py, PyAny>> = Vec::new();
+        let mut ran = false;
+        let mut iterated = lc.try_iter()?;
+        while let Some(pair_r) = iterated.next() {
+            let (val, loopobj): (Bound<'py, PyAny>, Bound<'py, PyAny>) = pair_r?.extract()?;
+            self.enter_scope(&kinds)?;
+            self.store_target(&args[0], &val, false)?;
+            {
+                if let Some(frame) = self.stack.borrow_mut().last_mut() {
+                    frame.slots.insert("loop".to_string(), Some(loopobj));
+                }
+            }
+            let res = self.exec_items(body, &mut buf);
+            self.pop_scope();
+            if res.is_err() {
+                self.unregister_lc(lptr);
+                return Err(res.unwrap_err());
+            }
+            ran = true;
+        }
+        let else_list = match &args[3] {
+            Av::List(l) => l,
+            _ => return Err(nope("bad for else")),
+        };
+        if !else_list.is_empty() && !ran {
+            let mut occs: Vec<(String, u8)> = Vec::new();
+            for it in else_list.iter() {
+                self.walk_fsf(it, &mut occs);
+            }
+            let ancestors = self.owned_union();
+            let kinds = self.build_kinds(&occs, &ancestors);
+            self.enter_scope(&kinds)?;
+            let res = self.exec_items(else_list, &mut buf);
+            self.pop_scope();
+            if res.is_err() {
+                self.unregister_lc(lptr);
+                return Err(res.unwrap_err());
+            }
+        }
+        self.unregister_lc(lptr);
+        let lst = PyList::new(self.py, &buf)?;
+        Ok(self.env.call_method1("concat", (&lst,))?)
+    }
+
+    /// Pre-evaluation scan mirroring the python code generator's compile-time
+    /// checks over the *whole* tree: nodes outside the evaluated subset (even
+    /// in never-executed positions), missing filter/test names (the compiler
+    /// fails on those unless they sit in a soft if/condexpr frame, and a
+    /// fallback reproduces either behaviour exactly), and assignment to the
+    /// special `loop` variable inside any `for` subtree.
+    fn scan(&self, av: &Av) -> Result<(), EvalErr> {
+        match av {
+            Av::List(inner) | Av::Tuple(inner) => {
+                for a in inner {
+                    self.scan(a)?;
+                }
+            }
+            Av::Node(name, _, args) => {
+                if !SUPPORTED_NODES.contains(name) {
+                    return Err(nope(*name));
+                }
+                if *name == "Filter" || *name == "Test" {
+                    if args.len() >= 6 {
+                        if let Some(nm) = arg_str(&args[1]) {
+                            let is_filter = *name == "Filter";
+                            let map = if is_filter { &self.filters } else { &self.tests };
+                            if map.get_item(nm)?.is_none() {
+                                let kind = if is_filter { "filter" } else { "test" };
+                                return Err(nope(format!("missing {} {:?}", kind, nm)));
+                            }
+                        }
+                    }
+                }
+                if *name == "For" {
+                    if let Some(l) = self.find_loop_store(av) {
+                        return Err(EvalErr::Exc(
+                            self.assertion_error(
+                                "Can't assign to special loop variable in for-loop target",
+                                Some(l),
+                            )?,
+                        ));
+                    }
+                }
+                for a in args {
+                    self.scan(a)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn find_loop_store(&self, av: &Av) -> Option<u32> {
+        match av {
+            Av::Node("Name", lineno, a) => {
+                if a.len() >= 2
+                    && arg_str(&a[0]) == Some("loop")
+                    && arg_str(&a[1]) == Some("store")
+                {
+                    *lineno
+                } else {
+                    None
+                }
+            }
+            Av::List(inner) | Av::Tuple(inner) => {
+                inner.iter().find_map(|x| self.find_loop_store(x))
+            }
+            Av::Node(_, _, a) => a.iter().find_map(|x| self.find_loop_store(x)),
+            _ => None,
+        }
+    }
+
+    fn assertion_error(&self, msg: &str, lineno: Option<u32>) -> Result<PyErr, EvalErr> {
+        let exceptions = self.py.import("jutsu.exceptions")?;
+        let cls = exceptions.getattr("TemplateAssertionError")?;
+        let inst = cls.call(
+            (
+                msg,
+                lineno.map(|l| l as i64),
+                self.name.clone(),
+                None::<String>,
+            ),
+            None,
+        )?;
+        inst.setattr("translated", true)?;
+        Ok(PyErr::from_value(inst))
+    }
+
+    fn unregister_lc(&self, ptr: usize) {
+        let mut r = self.rec.borrow_mut();
+        if let Some(i) = r.iter().position(|e| e.ptr == ptr) {
+            r.swap_remove(i);
+        }
+    }
+
+    fn rec_find(&self, func: &Bound<'py, PyAny>) -> Option<Vec<Av>> {
+        let r = self.rec.borrow();
+        let fptr = func.as_ptr() as usize;
+        for e in r.iter().rev() {
+            if e.ptr == fptr {
+                return Some(e.args.clone());
+            }
+        }
+        None
+    }
+
+    fn exec_with(&self, args: &[Av], out: &mut Vec<Bound<'py, PyAny>>) -> ERes<()> {
+        if args.len() < 3 {
+            return Err(nope("bad with node"));
+        }
+        let (targets, values) = match (&args[0], &args[1]) {
+            (Av::List(t), Av::List(v)) => (t, v),
+            _ => return Err(nope("bad with targets")),
+        };
+        let body = match &args[2] {
+            Av::List(b) => b,
+            _ => return Err(nope("bad with body")),
+        };
+        let mut occs: Vec<(String, u8)> = Vec::new();
+        for t in targets.iter() {
+            self.walk_fsf(t, &mut occs);
+        }
+        for it in body.iter() {
+            self.walk_fsf(it, &mut occs);
+        }
+        let ancestors = self.owned_union();
+        let kinds = self.build_kinds(&occs, &ancestors);
+        // values evaluate against the outer scopes: the code generator visits
+        // each expression with the parent frame, not the with frame.
+        let mut pairs: Vec<(usize, Bound<'py, PyAny>)> = Vec::new();
+        for (i, v) in values.iter().enumerate() {
+            if i >= targets.len() {
+                break;
+            }
+            pairs.push((i, self.node(v)?));
+        }
+        self.enter_scope(&kinds)?;
+        let mut res: ERes<()> = Ok(());
+        for (i, val) in &pairs {
+            if let Err(e) = self.store_target(&targets[*i], val, false) {
+                res = Err(e);
+                break;
+            }
+        }
+        if res.is_ok() {
+            res = self.exec_items(body, out);
+        }
+        self.pop_scope();
+        res
+    }
+}
+
+fn body_of(args: &[Av]) -> &[Av] {
+    match &args[2] {
+        Av::List(b) => b,
+        _ => &[],
     }
 }
 
@@ -541,11 +1489,25 @@ pub fn evaluate<'py>(
         Err(EvalErr::Exc(e)) => return EvalOutcome::Exc(e),
         Err(EvalErr::Unsupported(u)) => return EvalOutcome::Unsupported(u),
     };
-    match ev.node(av) {
-        Ok(v) => EvalOutcome::Rendered(v),
-        Err(EvalErr::Unsupported(u)) => EvalOutcome::Unsupported(u),
-        Err(EvalErr::Exc(e)) => EvalOutcome::Exc(e),
+    match ev.scan(av) {
+        Ok(()) => {}
+        Err(EvalErr::Unsupported(u)) => return EvalOutcome::Unsupported(u),
+        Err(EvalErr::Exc(e)) => return EvalOutcome::Exc(e),
+    }
+    let mut out: Vec<Bound<'py, PyAny>> = Vec::new();
+    match av {
+        Av::Node("Template", _, a) => {
+            let res = ev.exec_template(a, &mut out);
+            match res {
+                Ok(()) => match ev.out_join(out) {
+                    Ok(v) => EvalOutcome::Rendered(v),
+                    Err(EvalErr::Exc(e)) => EvalOutcome::Exc(e),
+                    Err(EvalErr::Unsupported(u)) => EvalOutcome::Unsupported(u),
+                },
+                Err(EvalErr::Exc(e)) => EvalOutcome::Exc(e),
+                Err(EvalErr::Unsupported(u)) => EvalOutcome::Unsupported(u),
+            }
+        }
+        _ => EvalOutcome::Unsupported("not a template".to_string()),
     }
 }
-
-

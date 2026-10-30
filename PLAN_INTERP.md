@@ -48,10 +48,23 @@ The compiler port has two candidate strategies:
       autoescape + Markup (including the non-markup-aware constant folding of
       `Concat.as_const`), environment finalize functions, volatile eval
       contexts -- all report unsupported so callers fall back.
-* [ ] C-v2: statements: print/set(+block)/if/for (incl. recursive + LoopContext
-      features cycle/first/last/revidx/depth/length/parent), with/autoescape
-      scope modifiers, block/include/import/from_import semantics via the
-      python template machinery (loaders stay python).
+* [X] C-v2: statements implemented -- print, set / set-block (implicit filter
+      target), if/elif/else, for incl. lazy test-filters, else branches,
+      extended loops (live `LoopContext`) and recursive loops (`loop()` renders
+      the next level in rust), with; loop features cycle/first/last/revidx/
+      depth/length/previtem/nextitem/changed via the real python LoopContext;
+      namespace refs.  Scope model: slot frames per hard scope with
+      first-occurrence init kinds (PARAM / ALIAS copy / RESOLVE / UNDEFINED),
+      root-level writeback into `context.vars` + exported_vars, stores inside
+      loops/blocks stay local; tuple targets unpack with python semantics and
+      messages.  Whole-tree pre-evaluation scan reproduces the code generator's
+      compile-time failures (unsupported nodes anywhere, missing filter/test
+      names, `loop` assignment in any for-subtree).  Deferred to C-v3/C-v4:
+      autoescape scope modifiers (`{% autoescape %}` -> Scope), macros,
+      filter/call blocks, block/include/import/from_import.
+      Validated: 40 fixed cases + 12k structured statement templates (3 seeds)
+      with exception type/message parity; perf: rust parse+eval 129 us vs
+      python compile+render 770 us cold, cached python render 6.2 us.
 * [ ] C-v3: macro, filter blocks, call blocks/caller, namespace objects.
 * [ ] C-v4: block inheritance + super(); `loop` in nested templates; error
       propagation parity (`TemplateRuntimeError`, tracebacks via debug.py --

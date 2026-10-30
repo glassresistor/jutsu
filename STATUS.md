@@ -24,7 +24,7 @@ the existing Jinja2 extensions and ecosystem.
 | Rust lexer (`crates/jutsu-core/src/lexer.rs`) | **done and wired into `Lexer.tokeniter`** |
 | Rust parser (`crates/jutsu-core/src/parser.rs`) | **done and wired into `Parser.parse`** (default on; `JUTSU_RUST_PARSER=0` switches back) |
 | Packaging (maturin wheel with rust core) | done (`maturin build -r -m crates/jutsu-core/Cargo.toml`) |
-| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | **slice C-v1: expressions evaluate fully in rust** against a live python `Context` (not wired into `Template.render` yet; validated differentially, incl. exception type/message parity) |
+| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | **slice C-v2: statements + scoping evaluate fully in rust** -- if/elif/else, for (incl. `if=` test filters, else branches, recursive loops with `loop()` recursion, full LoopContext features), set/set-block(+filter), with, namespace refs; compiled-engine scope semantics reproduced (slot frames, alias-copy on store, per-scope resolve loads, root writeback+exported_vars). Not wired into `Template.render` yet; validated differentially incl. exception type/message parity |
 | Code generator / runtime | still python (next targets: statements C-v2..) |
 
 The lexer port is validated three ways:
@@ -106,6 +106,44 @@ slice cannot express -- statements, dynamic call arguments, autoescape/Markup
 (the code generator folds constant output children through the non-markup-aware
 `Concat.as_const`), environment finalize functions, volatile eval contexts --
 is reported as unsupported so callers fall back to the python engine.
+
+## Evaluator port notes (slice C-v2)
+
+Statements execute with the compiled engine's scope model reproduced in rust:
+a runtime scope stack mirrors the code generator's frames, and each hard scope
+(root, for-body, for-else, with, set-block body) owns slot variables whose
+initialization follows the first source occurrence of the name -- parameters
+are not loaded, stores alias-copy from the nearest owning ancestor slot (or
+stay `missing`), and loads own a slot only when no scope in the chain owns it
+(then they resolve from the python context at each entry).  Tuple/list targets
+unpack with python's own sequence-unpack semantics and error messages; the
+special `loop` variable is provided by a live `LoopContext` (extended loops),
+and recursive loops register their loop object so calling it renders the next
+recursion level in rust exactly like the generated `loop(...)` call.
+Root-level assignments write back into `context.vars` and update
+`exported_vars`; stores inside loops/blocks stay local (`_loop_vars`).  The
+`{% with %}` values evaluate against the outer scopes (the generator visits
+each expression with the parent frame).
+
+A pre-evaluation scan reproduces the code generator's compile-time checks over
+the whole tree: nodes outside the evaluated subset (even in never-executed
+positions), missing filter/test names, and assignment to `loop` inside any
+for-subtree (raised as the same translated `TemplateAssertionError`).  This
+closes the gap where python fails at compile time for code the evaluator would
+never reach (`{% if false %}{% for loop in [] %}...` etc.).
+
+Perf evidence (statement template, 2000 iterations, this machine): python
+parse+compile 735 us, compile+render 770 us, *cached* render 6.2 us; rust
+parse+eval 129 us (~6x faster cold, still far behind a warm python cache --
+the AST-cache prerequisite before flipping any default remains).
+
+Validated by 40 fixed statement/scope cases plus a structured corpus of 12k
+generated full templates across three seeds comparing rendered text *and*
+exception type/message (`tests/test_rust_eval.py`, `scripts/fuzz_v2.py`);
+zero mismatches.  Deferred on purpose: macros, filter/call blocks, block
+inheritance and includes (dedicated slices C-v3/C-v4), dynamic call arguments,
+autoescape/Markup, environment finalize functions and volatile eval contexts
+-- all reported as unsupported so callers fall back to the python engine.
 
 ## Roadmap
 

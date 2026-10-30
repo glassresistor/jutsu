@@ -56,8 +56,25 @@ criterion.
       Undefined (subclasses: ChainableUndefined/FastUndefined), missing sentinel,
       output buffering (`concat`, markup_join, str_join)
 * [ ] autoescape semantics + `Markup` integration via markupsafe objects
-* [ ] loop context features: cycle/first/last/length/revindex/depth; recursive
-      loops; loop filters (`|sort` etc. stay python for now)
+* [X] slice C-v2 (statements) implemented in `eval.rs`: if/elif/else, for
+      (lazy test-filtered loops, else branches, extended loops via a live
+      `LoopContext`, recursive loops that render the next level in rust through
+      registered loop objects), set / set-block with implicit filter target,
+      with (values evaluated against outer scopes), namespace refs; compiled
+      scope model reproduced: slot frames per hard scope, first-occurrence
+      init kinds PARAM/ALIAS/RESOLVE/UNDEFINED, root writeback into
+      `context.vars` + exported_vars, python sequence-unpack semantics and
+      error messages for tuple targets.  A pre-evaluation scan mirrors the code
+      generator's compile-time checks over the whole tree (unsupported nodes
+      anywhere -- even in never-executed positions --, missing filter/test
+      names, `loop` assignment inside any for-subtree raised as the same
+      translated `TemplateAssertionError`).  Loop features cycle/first/last/
+      length/revidx/previtem/nextitem/changed/depth all go through the real
+      python `LoopContext`.  Validated: 40 fixed cases, loop-target and unpack
+      error parity tests, plus a 12k-template structured statement corpus
+      (3 seeds) with exception type/message parity -- zero mismatches.
+      Deferred: macros / filter-blocks / call-blocks (`caller()` closures),
+      block inheritance and includes (next slices C-v3/C-v4).
 * [ ] block inheritance machinery (super(), blocks dict, scoped blocks,
       required blocks) ported onto the interpreter
 * [ ] macro + filter-block semantics, `caller()` / CallBlock closures
@@ -71,6 +88,9 @@ criterion.
       once or twice (e.g. `Environment.from_string`), so before flipping any
       default it must cache parsed ASTs per source (and eventually compiled
       state) -- otherwise the python code path stays faster for warm caches.
+      Same conclusion after slice C-v2 (statement template, 2000 iters):
+      rust parse+eval 129 us vs python compile+render 770 us (~6x cold), but
+      cached python render only 6.2 us.
 * [ ] differential renderer validation: render every test template both ways,
       compare bytes + exceptions; fuzz too
 * [ ] flip default once suite green; keep python codegen path behind flag
