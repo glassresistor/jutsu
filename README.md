@@ -205,7 +205,5 @@ Same terms as upstream Jinja (BSD-3-Clause, Pallets) — see `LICENSE.txt`.
 
 ## Why "jutsu"?
 
-A *jutsu* is a technique or tactic — a martial arts port of an existing style.
-Porting Jinja2's internals into Rust while keeping its interface intact is
-close enough to justify the name, and it keeps the package distinct on PyPI so
-experiments can run alongside real Jinja2 installs.
+Jinja is some weird rename of ninja also a weird rename of shinobi.  `jutsu` is unique enough
+not to be confused, has same first letter and probably will make a cool icon.
