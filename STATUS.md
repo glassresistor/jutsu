@@ -24,7 +24,8 @@ the existing Jinja2 extensions and ecosystem.
 | Rust lexer (`crates/jutsu-core/src/lexer.rs`) | **done and wired into `Lexer.tokeniter`** |
 | Rust parser (`crates/jutsu-core/src/parser.rs`) | **done and wired into `Parser.parse`** (default on; `JUTSU_RUST_PARSER=0` switches back) |
 | Packaging (maturin wheel with rust core) | done (`maturin build -r -m crates/jutsu-core/Cargo.toml`) |
-| Code generator / runtime | still python (next targets) |
+| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | **slice C-v1: expressions evaluate fully in rust** against a live python `Context` (not wired into `Template.render` yet; validated differentially, incl. exception type/message parity) |
+| Code generator / runtime | still python (next targets: statements C-v2..) |
 
 The lexer port is validated three ways:
 
@@ -84,6 +85,27 @@ Extensions gate the switch: any extension contributing tags (i18n `trans`,
 `do`, loopcontrol's `break`/`continue`, debug), or overriding
 `filter_stream`/`preprocess`, forces the python parser -- see
 `_extensions_contribute()` in `parser.py`.
+
+## Evaluator port notes (slice C-v1)
+
+The evaluator consumes the rust parser's `Av` tree directly -- no python node
+rebuild, no codegen.  Every runtime value is a real python object and every
+operation goes through the same helper the compiled engine uses
+(`Context.resolve`, `Environment.getattr/getitem/call`,
+`Environment._filter_test_common`, `runtime.str_join`), so behaviour matches
+by construction rather than by reimplementation: undefined objects raise the
+same `UndefinedError`, chained comparisons short-circuit like python, and a
+failing operation propagates the original exception object untouched (the
+compiled engine re-raises it through `Environment.handle_exception`).  Parse
+errors get the same `translated` treatment `Environment.compile` applies so
+`str()` of them carries just the message.
+
+Validated by fixed cases plus a structured corpus of 6000 generated expression
+templates comparing rendered text *and* exception type/message; anything the
+slice cannot express -- statements, dynamic call arguments, autoescape/Markup
+(the code generator folds constant output children through the non-markup-aware
+`Concat.as_const`), environment finalize functions, volatile eval contexts --
+is reported as unsupported so callers fall back to the python engine.
 
 ## Roadmap
 

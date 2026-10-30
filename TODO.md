@@ -63,7 +63,14 @@ criterion.
 * [ ] macro + filter-block semantics, `caller()` / CallBlock closures
 * [ ] `with`/autoescape scope modifiers via ScopedEvalContextModifier
 * [ ] performance pass: avoid pyo3 round-trips for hot attribute lookups where
-      safe; measure against python-compiled baseline and only keep wins
+      safe; measure against python-compiled baseline and only keep wins.
+      Baseline measured after slice C-v1 (simple `{{ a ~ b }}`, 2000 iterations,
+      this machine): python parse+compile+render 234 us/op, rust parse+evaluate
+      19 us/op (12x faster), but a *cached* python template renders in 5 us/op.
+      Conclusion: the rust evaluator only wins for templates that are rendered
+      once or twice (e.g. `Environment.from_string`), so before flipping any
+      default it must cache parsed ASTs per source (and eventually compiled
+      state) -- otherwise the python code path stays faster for warm caches.
 * [ ] differential renderer validation: render every test template both ways,
       compare bytes + exceptions; fuzz too
 * [ ] flip default once suite green; keep python codegen path behind flag
