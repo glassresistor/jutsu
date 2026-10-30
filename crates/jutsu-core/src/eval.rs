@@ -82,7 +82,7 @@ pub struct Ev<'py> {
 /// Frames live in `Rc`s so that macro closures (slice C-v3b) can capture a
 /// defining frame chain whose slot objects stay alive -- and writable --
 /// after the render step that created them has ended.
-struct Scope {
+pub struct Scope {
     slots: HashMap<String, Option<Py<PyAny>>>,
 }
 
@@ -235,6 +235,7 @@ impl<'py> Ev<'py> {
     /// Interpreter over a captured session and defining frame chain: used by
     /// macro / caller closures (slice C-v3b) whose bodies evaluate against
     /// where they were defined, never the caller's live stack.
+    #[allow(dead_code)]
     pub fn with_chain(
         py: Python<'py>,
         s: Rc<Session>,
@@ -1226,7 +1227,7 @@ other => Err(nope(other.to_string())),
                     None => return Err(nope("name target")),
                 };
                 {
-                    let mut frames = self.stack.borrow_mut();
+                    let frames = self.stack.borrow();
                     for frame in frames.iter().rev() {
                         let mut sc = frame.borrow_mut();
                         if sc.slots.contains_key(name) {
