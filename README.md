@@ -1,0 +1,211 @@
+# jutsu
+
+**Jinja2, ported to Rust — with a Python wrapper.**
+
+`jutsu` is a fork of [pallets/jinja](https://github.com/pallets/jinja) (Jinja 3.1.x)
+in which the engine internals are being rewritten in Rust, while the Python package stays the public interface. The end state is a native compiled core that
+keeps working with the existing Jinja2 extensions, loaders and ecosystem.
+
+> **Status: work in progress.** The lexer, parser and (partially) the evaluator
+> already run in Rust; code generation, macros, block inheritance and includes
+> are still Python. Nothing here is installed or published yet — treat this as a
+> design document for what `jutsu` will be when it is done.
+
+## What it will be
+
+When finished, `jutsu` will be a **full Rust port of Jinja2 shipped behind a
+Python wrapper**: the same `Environment` / `Template` API you already know, with
+a compiled Rust core doing lexing, parsing and evaluation. Concretely:
+
+```
+┌─────────────────────────────────────────────┐
+│  Python layer (src/jutsu/)                  │
+│    Environment, Template, loaders,          │
+│    filters, tests, extensions, Undefined…   │
+│              │               │              │
+│  Rust core (crates/jutsu-core)              │
+│    lexer ─ parser ─ evaluator                │
+└─────────────────────────────────────────────┘
+```
+
+The Python layer is not a thin shim to be discarded. Runtime values are real
+Python objects at every step, and every operation goes through the same helpers
+the compiled Jinja engine uses (`Context.resolve`, `Environment.getattr /
+getitem / call`, `Environment._filter_test_common`, `runtime.str_join`). That way
+behaviour matches *by construction* rather than by reimplementation: `Undefined`
+raises the same `UndefinedError`, chained comparisons short-circuit like Python,
+and a failing operation propagates the original exception object untouched.
+
+### Planned API (drop-in for Jinja2)
+
+```python
+from jutsu import Environment, Template, FileSystemLoader
+
+env = Environment(loader=FileSystemLoader("templates"))
+tpl = env.get_template("index.html")
+print(tpl.render(name="world", items=[1, 2, 3]))
+```
+
+The public surface is the Jinja2 one — `Environment`, `Template`, all the
+loaders, `Undefined` / `StrictUndefined` / `ChainableUndefined` /
+`DebugUndefined`, `select_autoescape`, the `pass_context` /
+`pass_eval_context` decorators, and the full exception hierarchy.
+
+## Current status
+
+| Component | State |
+|---|---|
+| Python fork (`jinja2` → `jutsu`) | done; original test suite runs unchanged |
+| Rust lexer (`crates/jutsu-core/src/lexer.rs`) | **done**, wired into `Lexer.tokeniter` |
+| Rust parser (`crates/jutsu-core/src/parser.rs`) | **done**, default engine (`JUTSU_RUST_PARSER=0` to opt out) |
+| Packaging (maturin wheel with Rust core) | done |
+| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | expressions + statements + scoping + filter blocks; **not yet wired into `Template.render`** |
+| Code generator / runtime | still Python (macros, block inheritance, includes are next) |
+
+### Performance evidence so far
+
+Statement template, 2000 iterations:
+
+| Path | Time |
+|---|---|
+| Python parse + compile | 735 µs |
+| Python compile + render | 770 µs |
+| Python **cached** render | 6.2 µs |
+| Rust parse + eval | 129 µs |
+
+That is roughly **6× faster cold**, but still far behind a warm Python cache —
+the AST-cache prerequisite before any default can be flipped to the Rust path
+for template *rendering* (as opposed to parsing).
+
+## How correctness is proven
+
+Every ported component is validated three ways, because "it works on my tests"
+is not enough when the goal is a drop-in replacement:
+
+1. **The original Jinja2 test suite** — 900+ tests pass with the Rust core
+   active.
+2. **Rust unit tests** (`cargo test`) — whitespace control, lstrip/trim blocks,
+   raw blocks, line statements/comments, numeric literals, error semantics.
+3. **Differential fuzzing** — thousands (48k+ for the parser) of randomly
+   generated template sources are processed by *both* implementations and
+   compared token-for-token / node-for-node, including error messages, line
+   numbers, and partial output produced before an error. The Python
+   `tokeniter` is a generator, so partial tokens must be yielded before the
+   exception — a detail a naive port would miss.
+
+### Subtleties the ports had to reproduce
+
+Jinja's lexer is a regex-driven state machine; the Rust port replaces the regex
+engine with hand-written matchers over `Vec<char>` (Python indexes by code
+point) while reproducing CPython `re` semantics exactly:
+
+* Character classes come from tables generated out of CPython itself
+  (`scripts/gen_unicode_tables.py`).
+* Numeric literals reproduce subtle backtracking: `1_2` matches as an integer
+  but not as a float; `010` lexes as integer `0` followed by name `10`.
+* The raw begin tag (`{% raw %}`) only accepts the `-be\s* | be` variants — no
+  `+be`, no trim-blocks suffix, unlike every other end tag.
+* Failure rules `(.)` cannot match at end of input, so a dangling `{#` or
+  `{% raw %}` silently ends the stream instead of raising.
+* Python's `repr()` formatting is reproduced for error messages
+  (`unexpected char '\'' at N`).
+
+Extensions gate the switch: any extension that contributes tags (i18n `trans`,
+   `do`, loopcontrol's `break`/`continue`, debug) or overrides
+   `filter_stream`/`preprocess` forces the Python parser.
+
+## Roadmap
+
+| Phase | Scope | State |
+|---|---|---|
+| **A** | Fork Jinja2 as `jutsu`; Rust lexer wired into `Lexer.tokeniter` | ✅ done |
+| **B** | Full expression + statement grammar in Rust; AST rebuilt via `ast_rebuild.py`; default flipped | ✅ done |
+| **C** | Compiler/evaluator: expressions → statements/scoping → filter blocks → macros → inheritance/includes | 🟨 in progress |
+| **D** | Extensions (`i18n`, `autoescape`, `looplevel`) running on the Rust path; `NativeEnvironment` parity | ⬜ open |
+| **E** | Split pyo3 glue behind a cargo feature; ship `jutsu-wasm` / `@jutsu/core` for JavaScript | ⬜ open |
+| **F** | Release engineering: wheel matrix (manylinux/macOS/Windows), sdist, clippy, versioning story | ⬜ open |
+
+Two structural decisions are already locked in:
+
+* **Tree-walking interpreter in Rust over the Rust AST** — Python bytecode
+  emission was rejected. Evidence: rebuilding Python nodes costs more than the
+  whole Rust parse (Rust parse is ~5× the Python parser; parse+rebuild only
+  ~1.4×), so evaluating directly on the Rust AST is the only path with real
+  headroom.
+* **Loaders and bytecode caches stay pure Python.** Filesystem/zip/module-cache
+  work has no Rust value; revisit only if profiling says otherwise.
+
+Phase E carries an explicit parity caveat: Python filters and extensions are
+**not** available in JavaScript, so the JS build will support a documented
+subset (upper/lower/join/length/default/escape…) rather than pretending to be
+equivalent.
+
+## Repository layout
+
+```
+pyproject.toml                maturin build backend (Rust core + Python package)
+Cargo.toml                    Rust workspace
+crates/jutsu-core/
+  src/lib.rs                  pyo3 glue exposed to Python (`tokenize`)
+  src/lexer.rs                port of Jinja2's lexer
+  src/parser.rs               port of Jinja2's parser
+  src/eval.rs                 tree-walking evaluator
+  src/pyrepr.py … .rs         Python repr() formatting for error messages
+  src/unicode_tables.rs       generated tables matching CPython `re`
+src/jutsu/                    the Python package (forked from jinja2, imports renamed)
+tests/                        forked Jinja2 test suite + differential Rust tests
+scripts/                      fuzz drivers, unicode-table generator, benchmarks
+STATUS.md / TODO.md           per-phase status and the ordered to-do list
+PLAN_PARSER.md / PLAN_INTERP.md  design docs for the parser and interpreter ports
+```
+
+## Building and testing
+
+Python-only install (no Rust build step needed):
+
+```bash
+pip install -e .              # uses the maturin backend
+```
+
+Or build the native core manually:
+
+```bash
+cargo build --release -m crates/jutsu-core/Cargo.toml \
+  && cp target/release/lib_jutsu.so src/jutsu/_jutsu.so
+```
+
+Tests run against `src/` directly via pytest's `pythonpath = ["src"]`, so no
+install step is required during development:
+
+```bash
+pytest                        # forked Jinja2 suite + differential tests
+cargo test                    # Rust unit tests
+```
+
+### Feature flags
+
+| Variable | Default | Effect |
+|---|---|---|
+| `JUTSU_RUST_LEXER` | `1` | `=0` falls back to the pure-Python lexer (`Lexer._tokeniter_python`) |
+| `JUTSU_RUST_PARSER` | `1` | `=0` switches parsing back to the Python parser |
+
+The Rust core is optional at import time: if `_jutsu` cannot be imported,
+`jutsu` degrades to the pure-Python implementation rather than failing.
+
+## Versioning and compatibility
+
+The plan is to keep a Jinja-compatible minor version (`jutsu 3.1.x.y`) so that
+"drop-in compatible with Jinja2" is a claim that can actually be tested —
+including a `jinja2/__init__.py` shim that re-exports `jutsu` and runs Jinja's
+*own* test suite against it as the ultimate parity gate.
+
+## License
+
+Same terms as upstream Jinja (BSD-3-Clause, Pallets) — see `LICENSE.txt`.
+
+## Why "jutsu"?
+
+A *jutsu* is a technique or tactic — a martial arts port of an existing style.
+Porting Jinja2's internals into Rust while keeping its interface intact is
+close enough to justify the name, and it keeps the package distinct on PyPI so
+experiments can run alongside real Jinja2 installs.

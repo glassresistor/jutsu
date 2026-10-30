@@ -13,6 +13,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
@@ -70,32 +71,47 @@ fn arg_str(av: &Av) -> Option<&str> {
 
 pub struct Ev<'py> {
     py: Python<'py>,
-    env: Bound<'py, PyAny>,
-    ctx: Bound<'py, PyAny>,
-    evalctx: Bound<'py, PyAny>,
-    rt: Bound<'py, PyAny>,
-    filters: Bound<'py, PyDict>,
-    tests: Bound<'py, PyDict>,
-    slice_cls: Bound<'py, PyAny>,
-    autoescape: bool,
-    name: Option<String>,
-    /// The `runtime.missing` sentinel.
-    missing: Bound<'py, PyAny>,
-    /// `environment.undefined`, the undefined factory used at load sites.
-    undef: Bound<'py, PyAny>,
-    /// `runtime.LoopContext` class.
-    loopctx: Bound<'py, PyAny>,
-    /// `runtime.Namespace` class.
-    ns: Bound<'py, PyAny>,
-    /// Live scope frames, innermost last.
-    stack: RefCell<Vec<Scope<'py>>>,
-    /// Loop contexts created for recursive loops, awaiting recursive calls.
-    rec: RefCell<Vec<RecEntry>>
+    s: Rc<Session>,
+    /// Interpreter-local scope frames, innermost last.  Frames are shared by
+    /// `Rc` so closures captured at a macro definition keep seeing the live
+    /// slot objects even after this interpreter instance has finished.
+    stack: RefCell<Vec<Rc<RefCell<Scope>>>>,
 }
 
 /// One runtime scope frame: slots by name; `None` is the `missing` sentinel.
-struct Scope<'py> {
-    slots: HashMap<String, Option<Bound<'py, PyAny>>>,
+/// Frames live in `Rc`s so that macro closures (slice C-v3b) can capture a
+/// defining frame chain whose slot objects stay alive -- and writable --
+/// after the render step that created them has ended.
+struct Scope {
+    slots: HashMap<String, Option<Py<PyAny>>>,
+}
+
+/// Shared evaluator session.  Everything except the per-interpreter scope
+/// stack lives here in owned form so it can be captured by python-side
+/// closures (the `runtime.Macro` wrapper holds a rust callable object that
+/// outlives individual FFI calls).  Invariant: no borrow of a `RefCell`
+/// field may be held across a python call; helpers below collect values
+/// first and construct undefined objects only after dropping borrows.
+pub struct Session {
+    env: Py<PyAny>,
+    evalctx: Py<PyAny>,
+    ctx: Py<PyAny>,
+    rt: Py<PyAny>,
+    filters: Py<PyDict>,
+    tests: Py<PyDict>,
+    slice_cls: Py<PyAny>,
+    /// The `runtime.missing` sentinel.
+    missing: Py<PyAny>,
+    /// `environment.undefined`, the undefined factory used at load sites.
+    undef: Py<PyAny>,
+    /// `runtime.LoopContext` class.
+    loopctx: Py<PyAny>,
+    /// `runtime.Namespace` class.
+    ns: Py<PyAny>,
+    autoescape: bool,
+    name: Option<String>,
+    /// Loop contexts created for recursive loops, awaiting recursive calls.
+    rec: RefCell<Vec<RecEntry>>,
 }
 
 /// How a slot is initialized when its scope is entered (mirrors the code
@@ -149,13 +165,13 @@ struct Sym {
     stores: std::collections::HashSet<String>,
 }
 
-impl<'py> Ev<'py> {
-    fn new(
-        py: Python<'py>,
-        ctx: Bound<'py, PyAny>,
-        rt: Bound<'py, PyAny>,
+impl Session {
+    fn build(
+        py: Python<'_>,
+        ctx: &Bound<'_, PyAny>,
+        rt: &Bound<'_, PyAny>,
         name: Option<String>,
-    ) -> Result<Ev<'py>, EvalErr> {
+    ) -> Result<Rc<Session>, EvalErr> {
         let env = ctx.getattr("environment")?;
         let evalctx = ctx.getattr("eval_ctx")?;
         let volatile: bool = evalctx.getattr("volatile")?.extract()?;
@@ -186,47 +202,106 @@ impl<'py> Ev<'py> {
         let loopctx = rt.getattr("LoopContext")?;
         let ns = rt.getattr("Namespace")?;
         let undef = env.getattr("undefined")?;
-        Ok(Ev {
-            py,
-            env,
-            ctx,
-            evalctx,
-            rt,
-            filters,
-            tests,
-            slice_cls,
+        Ok(Rc::new(Session {
+            env: env.unbind(),
+            evalctx: evalctx.unbind(),
+            ctx: ctx.clone().unbind(),
+            rt: rt.clone().unbind(),
+            filters: filters.unbind(),
+            tests: tests.unbind(),
+            slice_cls: slice_cls.unbind(),
+            missing: missing.unbind(),
+            undef: undef.unbind(),
+            loopctx: loopctx.unbind(),
+            ns: ns.unbind(),
             autoescape,
             name,
-            missing,
-            undef,
-            loopctx,
-            ns,
-            stack: RefCell::new(Vec::new()),
             rec: RefCell::new(Vec::new()),
-        })
+        }))
+    }
+}
+
+impl<'py> Ev<'py> {
+    fn new(
+        py: Python<'py>,
+        ctx: Bound<'py, PyAny>,
+        rt: Bound<'py, PyAny>,
+        name: Option<String>,
+    ) -> Result<Ev<'py>, EvalErr> {
+        let s = Session::build(py, &ctx, &rt, name)?;
+        Ok(Ev { py, s, stack: RefCell::new(Vec::new()) })
+    }
+
+    /// Interpreter over a captured session and defining frame chain: used by
+    /// macro / caller closures (slice C-v3b) whose bodies evaluate against
+    /// where they were defined, never the caller's live stack.
+    pub fn with_chain(
+        py: Python<'py>,
+        s: Rc<Session>,
+        chain: Vec<Rc<RefCell<Scope>>>,
+    ) -> Ev<'py> {
+        Ev { py, s, stack: RefCell::new(chain) }
+    }
+
+    fn env(&self) -> Bound<'py, PyAny> {
+        self.s.env.bind(self.py).clone()
+    }
+    fn evalctx(&self) -> Bound<'py, PyAny> {
+        self.s.evalctx.bind(self.py).clone()
+    }
+    fn ctx(&self) -> Bound<'py, PyAny> {
+        self.s.ctx.bind(self.py).clone()
+    }
+    fn rt(&self) -> Bound<'py, PyAny> {
+        self.s.rt.bind(self.py).clone()
+    }
+    fn filters(&self) -> Bound<'py, PyDict> {
+        self.s.filters.bind(self.py).clone()
+    }
+    fn tests(&self) -> Bound<'py, PyDict> {
+        self.s.tests.bind(self.py).clone()
+    }
+    fn slice_cls(&self) -> Bound<'py, PyAny> {
+        self.s.slice_cls.bind(self.py).clone()
+    }
+    fn missing(&self) -> Bound<'py, PyAny> {
+        self.s.missing.bind(self.py).clone()
+    }
+    fn undef(&self) -> Bound<'py, PyAny> {
+        self.s.undef.bind(self.py).clone()
+    }
+    fn loopctx(&self) -> Bound<'py, PyAny> {
+        self.s.loopctx.bind(self.py).clone()
+    }
+    fn ns(&self) -> Bound<'py, PyAny> {
+        self.s.ns.bind(self.py).clone()
+    }
+    fn autoescape(&self) -> bool {
+        self.s.autoescape
     }
 
 
     /// Raw context lookup: `Context.resolve_or_missing`, `None` for missing.
-    fn raw_resolve(&self, name: &str) -> Result<Option<Bound<'py, PyAny>>, PyErr> {
-        let rv = self.ctx.call_method1("resolve_or_missing", (name,))?;
-        if rv.is(&self.missing) {
+    fn raw_resolve(&self, name: &str) -> Result<Option<Py<PyAny>>, PyErr> {
+        let miss = self.missing();
+        let rv = self.ctx().call_method1("resolve_or_missing", (name,))?;
+        if rv.is(&miss) {
             Ok(None)
         } else {
-            Ok(Some(rv))
+            Ok(Some(rv.unbind()))
         }
     }
 
     /// Wrap a slot value for a load site: missing becomes a fresh undefined
     /// created by the environment's factory, exactly like the generated
     /// `(undefined(name='x') if l_0_x is missing else l_0_x)`.
-    fn wrap(&self, name: &str, v: Option<&Bound<'py, PyAny>>) -> ERes<Bound<'py, PyAny>> {
+    fn wrap(&self, name: &str, v: Option<Py<PyAny>>) -> ERes<Bound<'py, PyAny>> {
         match v {
-            Some(x) => Ok(x.clone()),
+            Some(x) => Ok(x.into_bound(self.py)),
             None => {
                 let kw = PyDict::new(self.py);
                 kw.set_item("name", name)?;
-                Ok(self.undef.call((), Some(&kw))?)
+                Ok(self.undef().call((), Some(&kw))?)
             }
         }
     }
@@ -234,16 +309,24 @@ impl<'py> Ev<'py> {
     /// Scope-aware name lookup for load sites: walk the scope chain from the
     /// innermost frame; slots win, otherwise read from the python context.
     fn lookup(&self, name: &str) -> ERes<Bound<'py, PyAny>> {
-        {
+        let found: Option<Option<Py<PyAny>>> = {
             let frames = self.stack.borrow();
+            let mut out: Option<Option<Py<PyAny>>> = None;
             for frame in frames.iter().rev() {
-                if let Some(v) = frame.slots.get(name) {
-                    return self.wrap(name, v.as_ref());
+                if let Some(v) = frame.borrow().slots.get(name).cloned() {
+                    out = Some(v);
+                    break;
                 }
             }
+            out
+        };
+        match found {
+            Some(v) => self.wrap(name, v),
+            None => {
+                let raw = self.raw_resolve(name)?;
+                self.wrap(name, raw)
+            }
         }
-        let raw = self.raw_resolve(name)?;
-        self.wrap(name, raw.as_ref())
     }
 
     /// Names owned by any live scope (the compiled engine's `find_ref` set).
@@ -251,7 +334,7 @@ impl<'py> Ev<'py> {
         let frames = self.stack.borrow();
         let mut out: Vec<String> = Vec::new();
         for frame in frames.iter() {
-            for k in frame.slots.keys() {
+            for k in frame.borrow().slots.keys() {
                 if !out.contains(k) {
                     out.push(k.clone());
                 }
@@ -261,11 +344,11 @@ impl<'py> Ev<'py> {
     }
 
     /// Value of the nearest owning slot for `name`, walking innermost first.
-    fn nearest_slot(&self, name: &str) -> Option<Option<Bound<'py, PyAny>>> {
+    fn nearest_slot(&self, name: &str) -> Option<Option<Py<PyAny>>> {
         let frames = self.stack.borrow();
         for frame in frames.iter().rev() {
-            if let Some(v) = frame.slots.get(name) {
-                return Some(v.clone());
+            if let Some(v) = frame.borrow().slots.get(name).cloned() {
+                return Some(v);
             }
         }
         None
@@ -296,8 +379,8 @@ impl<'py> Ev<'py> {
     }
 
     fn out_str(&self, v: &Bound<'py, PyAny>) -> ERes<Bound<'py, PyAny>> {
-        if self.autoescape {
-            let esc = self.rt.getattr("escape")?;
+        if self.autoescape() {
+            let esc = self.rt().getattr("escape")?;
             Ok(esc.call1((v,))?.str()?.into_any())
         } else {
             Ok(v.str()?.into_any())
@@ -309,11 +392,11 @@ impl<'py> Ev<'py> {
     /// `str_join` otherwise.
     fn concat_values(&self, parts: Vec<Bound<'py, PyAny>>) -> ERes<Bound<'py, PyAny>> {
         let tup = PyTuple::new(self.py, parts)?;
-        if self.autoescape {
-            let mj = self.rt.getattr("markup_join")?;
+        if self.autoescape() {
+            let mj = self.rt().getattr("markup_join")?;
             Ok(mj.call1((tup,))?)
         } else {
-            let sj = self.rt.getattr("str_join")?;
+            let sj = self.rt().getattr("str_join")?;
             Ok(sj.call1((tup,))?)
         }
     }
@@ -342,14 +425,14 @@ impl<'py> Ev<'py> {
             while vals.len() < 3 {
                 vals.push(self.none())
             }
-            let sl = self.slice_cls.call(
+            let sl = self.slice_cls().call(
                 (vals[0].clone(), vals[1].clone(), vals[2].clone()),
                 None,
             )?;
             return Ok(obj.get_item(sl)?);
         }
         let key = self.node(arg)?;
-        Ok(self.env.call_method1("getitem", (obj, key))?)
+        Ok(self.env().call_method1("getitem", (obj, key))?)
     }
 
     /// Positional and keyword arguments of a call, filter or test.  `prefix`
@@ -414,7 +497,7 @@ impl<'py> Ev<'py> {
             Some(s) => s,
             None => return Err(nope("filter/test name")),
         };
-        let map = if is_filter { &self.filters } else { &self.tests };
+        let map = if is_filter { self.filters() } else { self.tests() };
         if map.get_item(name)?.is_none() {
             let kind = if is_filter { "filter" } else { "test" };
             return Err(nope(format!("missing {} {:?}", kind, name)));
@@ -430,10 +513,12 @@ impl<'py> Ev<'py> {
             Some(d) => d.into_any(),
             None => self.none(),
         };
+        let ctxv = self.ctx();
+        let evalv = self.evalctx();
         let flag = is_filter.into_bound_py_any(self.py)?;
-        Ok(self.env.call_method(
+        Ok(self.env().call_method(
             "_filter_test_common",
-            (name, &value, &args_list, &kwargs_arg, &self.ctx, &self.evalctx, &flag),
+            (name, &value, &args_list, &kwargs_arg, &ctxv, &evalv, &flag),
             None,
         )?)
     }
@@ -465,7 +550,7 @@ impl<'py> Ev<'py> {
             _ => return Err(nope("call argument lists")),
         };
         let tup = PyTuple::new(self.py, alist)?;
-        Ok(self.ctx.call_method("call", tup, kw.as_ref())?)
+        Ok(self.ctx().call_method("call", tup, kw.as_ref())?)
     }
 
     /// Chained comparison, mirroring python's semantics: operands evaluate
@@ -523,14 +608,14 @@ impl<'py> Ev<'py> {
             Some(l) => format!("line {}", l),
             None => "unknown".to_string(),
         };
-        if let Some(nm) = &self.name {
-            pos = format!("{} in {}", pos, py_repr_str(nm));
+        if let Some(nm) = self.s.name.as_ref() {
+            pos = format!("{} in {}", pos, py_repr_str(nm.as_str()));
         }
         let hint = format!(
             "the inline if-expression on {} evaluated to false and no else section was defined.",
             pos
         );
-        Ok(self.rt.getattr("Undefined")?.call1((hint,))?)
+        Ok(self.rt().getattr("Undefined")?.call1((hint,))?)
     }
 
     fn two(&self, args: &[Av]) -> ERes<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
@@ -566,7 +651,7 @@ impl<'py> Ev<'py> {
                     Some(s) => s,
                     None => return Err(nope("attribute name")),
                 };
-                Ok(self.env.call_method1("getattr", (&obj, attr))?)
+                Ok(self.env().call_method1("getattr", (&obj, attr))?)
             }
             "Getitem" => {
                 let obj = self.node(&args[0])?;
@@ -904,12 +989,12 @@ other => Err(nope(other.to_string())),
         }
     }
 
-    fn init_scope(&self, kinds: &HashMap<String, IK>) -> ERes<Scope<'py>> {
-        let mut slots: HashMap<String, Option<Bound<'py, PyAny>>> = HashMap::new();
+    fn init_scope(&self, kinds: &HashMap<String, IK>) -> ERes<Scope> {
+        let mut slots: HashMap<String, Option<Py<PyAny>>> = HashMap::new();
         let names: Vec<String> = kinds.keys().cloned().collect();
         for name in names {
             let k = kinds[&name];
-            let v = match k {
+            let v: Option<Py<PyAny>> = match k {
                 IK::Param | IK::Undef => None,
                 IK::Resolve => self.raw_resolve(&name)?,
                 IK::Alias => match self.nearest_slot(&name) {
@@ -924,7 +1009,7 @@ other => Err(nope(other.to_string())),
 
     fn enter_scope(&self, kinds: &HashMap<String, IK>) -> ERes<()> {
         let sc = self.init_scope(kinds)?;
-        self.stack.borrow_mut().push(sc);
+        self.stack.borrow_mut().push(Rc::new(RefCell::new(sc)));
         Ok(())
     }
 
@@ -1081,7 +1166,7 @@ other => Err(nope(other.to_string())),
         self.target_names(tgt, &mut names);
         self.store_target(tgt, &val, false)?;
         if !names.is_empty() && self.stack.borrow().len() == 1 {
-            let vars = self.ctx.getattr("vars")?;
+            let vars = self.ctx().getattr("vars")?;
             for name in &names {
                 if let Some(Some(vv)) = self.nearest_slot(name) {
                     vars.set_item(name.as_str(), vv)?;
@@ -1093,7 +1178,7 @@ other => Err(nope(other.to_string())),
                 .cloned()
                 .collect();
             if !public.is_empty() {
-                let ex = self.ctx.getattr("exported_vars")?;
+                let ex = self.ctx().getattr("exported_vars")?;
                 let strs: Vec<Bound<'py, PyAny>> = public
                     .iter()
                     .map(|s| PyString::new(self.py, s).into_any())
@@ -1108,25 +1193,28 @@ other => Err(nope(other.to_string())),
     /// Load a namespace base object raw: the compiled engine checks
     /// `isinstance(ref, Namespace)` on the slot value itself.
     fn load_raw_ns_base(&self, name: &str) -> ERes<Bound<'py, PyAny>> {
-        {
+        let found: Option<Option<Py<PyAny>>> = {
             let frames = self.stack.borrow();
+            let mut out: Option<Option<Py<PyAny>>> = None;
             for frame in frames.iter().rev() {
-                if let Some(v) = frame.slots.get(name) {
-                    let kw = PyDict::new(self.py);
-                    kw.set_item("name", name)?;
-                    return Ok(match v {
-                        Some(x) => x.clone(),
-                        None => self.undef.call((), Some(&kw))?,
-                    });
+                if let Some(v) = frame.borrow().slots.get(name).cloned() {
+                    out = Some(v);
+                    break;
                 }
             }
-        }
-        let raw = self.raw_resolve(name)?;
-        let kw = PyDict::new(self.py);
-        kw.set_item("name", name)?;
-        Ok(match raw {
-            Some(x) => x,
-            None => self.undef.call((), Some(&kw))?,
+            out
+        };
+        let v: Option<Py<PyAny>> = match found {
+            Some(inner) => inner,
+            None => self.raw_resolve(name)?,
+        };
+        Ok(match v {
+            Some(x) => x.into_bound(self.py),
+            None => {
+                let kw = PyDict::new(self.py);
+                kw.set_item("name", name)?;
+                self.undef().call((), Some(&kw))?
+            }
         })
     }
 
@@ -1139,9 +1227,10 @@ other => Err(nope(other.to_string())),
                 };
                 {
                     let mut frames = self.stack.borrow_mut();
-                    for frame in frames.iter_mut().rev() {
-                        if frame.slots.contains_key(name) {
-                            frame.slots.insert(name.to_string(), Some(val.clone()));
+                    for frame in frames.iter().rev() {
+                        let mut sc = frame.borrow_mut();
+                        if sc.slots.contains_key(name) {
+                            sc.slots.insert(name.to_string(), Some(val.clone().unbind()));
                             return Ok(());
                         }
                     }
@@ -1158,7 +1247,7 @@ other => Err(nope(other.to_string())),
                     None => return Err(nope("nsref attr")),
                 };
                 let obj = self.load_raw_ns_base(base)?;
-                if !obj.is_instance(&self.ns)? {
+                if !obj.is_instance(&self.ns())? {
                     return Err(EvalErr::Exc(PyErr::new::<TemplateRuntimeError, _>(
                         "cannot assign attribute on non-namespace object",
                     )));
@@ -1263,7 +1352,7 @@ other => Err(nope(other.to_string())),
             return Err(e);
         }
         let lst = PyList::new(self.py, &buf)?;
-        let value = self.env.call_method1("concat", (&lst,))?;
+        let value = self.env().call_method1("concat", (&lst,))?;
         let applied = self.eval_filter_hole(&args[1], &value)?;
         self.pop_scope();
         out.push(self.out_str(&applied)?);
@@ -1312,7 +1401,7 @@ other => Err(nope(other.to_string())),
             return Err(res.unwrap_err());
         }
         let lst = PyList::new(self.py, &buf)?;
-        let mut value = self.env.call_method1("concat", (&lst,))?;
+        let mut value = self.env().call_method1("concat", (&lst,))?;
         if !matches!(&args[1], Av::NoneV) {
             value = self.eval_filter_hole(&args[1], &value)?;
         }
@@ -1391,15 +1480,18 @@ other => Err(nope(other.to_string())),
         let mut ran = false;
         if extended {
             let none = self.py.None();
-            let lc = self.loopctx.call1((&iter_val, &self.undef, none, 0i64))?;
+            let lc = self.loopctx().call1((&iter_val, &self.undef(), none, 0i64))?;
             let mut iterated = lc.try_iter()?;
             while let Some(pair_r) = iterated.next() {
                 let (val, loopobj): (Bound<'py, PyAny>, Bound<'py, PyAny>) = pair_r?.extract()?;
                 self.enter_scope(&kinds)?;
                 self.store_target(&args[0], &val, false)?;
                 {
-                    if let Some(frame) = self.stack.borrow_mut().last_mut() {
-                        frame.slots.insert("loop".to_string(), Some(loopobj));
+                    if let Some(frame) = self.stack.borrow().last().cloned() {
+                        frame.borrow_mut().slots.insert(
+                            "loop".to_string(),
+                            Some(loopobj.clone().unbind()),
+                        );
                     }
                 }
                 self.exec_items(&body_of(args), out)?;
@@ -1469,9 +1561,9 @@ other => Err(nope(other.to_string())),
     ) -> ERes<Bound<'py, PyAny>> {
         let (kinds, _extended) = self.loop_kinds(args)?;
         let none = self.py.None();
-        let lc = self.loopctx.call1((&iterable, &self.undef, none, depth0))?;
+        let lc = self.loopctx().call1((&iterable, &self.undef(), none, depth0))?;
         let lptr = lc.as_ptr() as usize;
-        self.rec.borrow_mut().push(RecEntry {
+        self.s.rec.borrow_mut().push(RecEntry {
             ptr: lptr,
             args: args.to_vec(),
         });
@@ -1484,8 +1576,11 @@ other => Err(nope(other.to_string())),
             self.enter_scope(&kinds)?;
             self.store_target(&args[0], &val, false)?;
             {
-                if let Some(frame) = self.stack.borrow_mut().last_mut() {
-                    frame.slots.insert("loop".to_string(), Some(loopobj));
+                if let Some(frame) = self.stack.borrow().last().cloned() {
+                    frame.borrow_mut().slots.insert(
+                        "loop".to_string(),
+                        Some(loopobj.clone().unbind()),
+                    );
                 }
             }
             let res = self.exec_items(body, &mut buf);
@@ -1517,7 +1612,7 @@ other => Err(nope(other.to_string())),
         }
         self.unregister_lc(lptr);
         let lst = PyList::new(self.py, &buf)?;
-        Ok(self.env.call_method1("concat", (&lst,))?)
+        Ok(self.env().call_method1("concat", (&lst,))?)
     }
 
     /// Pre-evaluation scan mirroring the python code generator's compile-time
@@ -1541,7 +1636,7 @@ other => Err(nope(other.to_string())),
                     if args.len() >= 6 {
                         if let Some(nm) = arg_str(&args[1]) {
                             let is_filter = *name == "Filter";
-                            let map = if is_filter { &self.filters } else { &self.tests };
+                            let map = if is_filter { self.filters() } else { self.tests() };
                             if map.get_item(nm)?.is_none() {
                                 let kind = if is_filter { "filter" } else { "test" };
                                 return Err(nope(format!("missing {} {:?}", kind, nm)));
@@ -1595,7 +1690,7 @@ other => Err(nope(other.to_string())),
             (
                 msg,
                 lineno.map(|l| l as i64),
-                self.name.clone(),
+                self.s.name.clone(),
                 None::<String>,
             ),
             None,
@@ -1605,14 +1700,14 @@ other => Err(nope(other.to_string())),
     }
 
     fn unregister_lc(&self, ptr: usize) {
-        let mut r = self.rec.borrow_mut();
+        let mut r = self.s.rec.borrow_mut();
         if let Some(i) = r.iter().position(|e| e.ptr == ptr) {
             r.swap_remove(i);
         }
     }
 
     fn rec_find(&self, func: &Bound<'py, PyAny>) -> Option<Vec<Av>> {
-        let r = self.rec.borrow();
+        let r = self.s.rec.borrow();
         let fptr = func.as_ptr() as usize;
         for e in r.iter().rev() {
             if e.ptr == fptr {
