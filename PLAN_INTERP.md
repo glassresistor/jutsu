@@ -86,11 +86,30 @@ The compiler port has two candidate strategies:
       and matches.  Validated: 33 differential cases plus 8 codegen-syntax
       fallback cases and 4 semantics locks, and 33k structured macro
       templates over eleven seeds, zero mismatches.
-* [~] C-v4a (partial): plain block inheritance + super()/self implemented and
-      validated differentially; scoped blocks, parent-side error parity and the
-      `loop` / error-propagation items still open. Error
-      propagation parity (`TemplateRuntimeError`, tracebacks via debug.py --
-      likely keep python-side wrapping).
+* [x] C-v4a: plain block inheritance + super()/self implemented and validated
+      differentially (extends chains, codegen runtime guards mirrored
+      dynamically, required blocks); scoped blocks, non-string extends targets
+      and un-loadable parents fell back.
+* [x] C-v4b: scoped blocks (`{% block x scoped %}`) -- derived eval contexts.
+      Call-site locals dumped by merging the live scope frames top-down with
+      boundary-stop at generated-function symbol chains (template roots, block
+      functions), passed through python's own `Context.derived` which copies
+      the blocks lists; the derived object flows onward through block function
+      bodies, super()/self bindings, nested scoped invocations and macro-closure
+      captures (`ctxobj`). Extended-loop forcing by any scoped block below a
+      for node mirrored; test-filtered extended/recursive loops rejected at scan
+      time (unsupported from inside a closure body could no longer become an
+      engine switch). Still open: parent-side error parity instead of fallback,
+      and the `loop` / error-propagation items. Error propagation parity
+      (`TemplateRuntimeError`, tracebacks via debug.py -- likely keep
+      python-side wrapping).
+* [ ] C-v5: includes and imports (`{% include %}`, `{% import %}`,
+      `{% from %}...{% import %}`): the with/without-context split (the
+      `template.new_context(context.get_all(), True, dump_local_context(frame))`
+      call reuses exactly the machinery of C-v4b), the exported_vars / name
+      discarding rules of named imports, and template modules for `{% import %}`
+      (`_get_default_module` vs `make_module`) -- loaders stay python-side via
+      the existing token-source channel.
 * [ ] performance pass: measure against python-compiled baseline; only keep
       wins; watch pyo3 round-trips for attribute access and iteration.
 

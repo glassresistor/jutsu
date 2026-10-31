@@ -24,7 +24,7 @@ the existing Jinja2 extensions and ecosystem.
 | Rust lexer (`crates/jutsu-core/src/lexer.rs`) | **done and wired into `Lexer.tokeniter`** |
 | Rust parser (`crates/jutsu-core/src/parser.rs`) | **done and wired into `Parser.parse`** (default on; `JUTSU_RUST_PARSER=0` switches back) |
 | Packaging (maturin wheel with rust core) | done (`maturin build -r -m crates/jutsu-core/Cargo.toml`) |
-| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | **slice C-v2/C-v3a/C-v3b/C-v4a: statements, scoping and macros/call blocks evaluate fully in rust** -- if/elif/else, for (incl. `if=` test filters, else branches, recursive loops with `loop()` recursion, full LoopContext features), set/set-block(+filter), filter blocks, with, namespace refs, `{% macro %}` / `{% call %}` with caller/kwargs/varargs closures; compiled-engine scope semantics reproduced (slot frames, alias-copy on store, per-scope resolve loads, root writeback+exported_vars). Slice C-v4a adds plain block inheritance: `{% extends %}` chains, block invocation with the code generator's runtime guards (`extends_so_far`/`has_known_extends`), `super()` through python's own `Context.super` and `BlockReference`, `self` via `TemplateReference`, required blocks; scoped blocks fall back).) Not wired into `Template.render` yet; validated differentially incl. exception type/message parity |
+| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | **slice C-v2/C-v3a/C-v3b/C-v4a/C-v4b: statements, scoping and macros/call blocks evaluate fully in rust** -- if/elif/else, for (incl. `if=` test filters, else branches, recursive loops with `loop()` recursion, full LoopContext features), set/set-block(+filter), filter blocks, with, namespace refs, `{% macro %}` / `{% call %}` with caller/kwargs/varargs closures; compiled-engine scope semantics reproduced (slot frames, alias-copy on store, per-scope resolve loads, root writeback+exported_vars). Slice C-v4a adds plain block inheritance: `{% extends %}` chains, block invocation with the code generator's runtime guards (`extends_so_far`/`has_known_extends`), `super()` through python's own `Context.super` and `BlockReference`, `self` via `TemplateReference`, required blocks. Slice C-v4b closes scoped blocks: derived eval contexts dumped from the live scope chain at the invocation site through python's own `Context.derived`; includes/imports stay deferred (slice C-v5). Not wired into `Template.render` yet; validated differentially incl. exception type/message parity |
 | Code generator / runtime | still python (next targets: block inheritance, includes/imports) |
 
 The lexer port is validated three ways:
@@ -282,4 +282,54 @@ are not provided or cannot be parsed -- where python raises too. Full suite 990
 passed with the rust core active. Deferred follow-ups: scoped blocks' derived
 context semantics, parent-side error parity instead of fallback, includes /
 imports (`{% include %}`, `{% import %}`) as slice C-v5.
+
+## Evaluator port notes (slice C-v4b)
+
+Scoped blocks now run inside rust too. A scoped invocation evaluates its
+`dump_local_context` equivalent at the call site: the live scope frames of the
+interpreter instance are merged from the top down -- inner layers shadow outer
+ones exactly like `Symbols.find_ref`, names owned but still `missing` stay out
+of the derived dict (and still shadow, matching the single reference per name),
+and the walk stops after the first *boundary* frame: scopes pushed by template
+roots and block functions are where a generated function's symbol chain ends,
+so nothing below them is ever dumped. The mapping goes through python's own
+`Context.derived`, which merges it over the current vars, copies the blocks
+lists and shares the eval context -- byte-identical semantics by construction.
+The derived object flows onward: block functions run with whatever caller
+passed (`BlockFunc.__call__` no longer ignores its argument), `super()` /
+`TemplateReference` bind on that same object, nested scoped invocations derive
+from it again, and macro closures capture the context current at their own
+definition (the generated code's closure over the nearest enclosing function's
+`context` variable) rather than whatever caller passes later.
+
+Two systematic mirrors rounded out the slice. First, visit_For's `extended_loop`
+is forced by *any* scoped block below a for node -- not just by a `loop` load or
+recursive mode -- so the rust loop switches to its LoopContext branch for those
+templates as well (the stores of such a loop include the special variable, which
+is what makes them dump into derived contexts). Second, test-filtered loops that
+would need the code generator's reciter-wrapping / LoopContext-over-the-filter-
+generator path are now rejected at scan time instead of mid-execution: an
+unsupported report from inside a block function or macro body could no longer
+turn into a clean engine switch (it would surface as a python `RuntimeError`
+instead), and falling back before anything runs is always allowed -- the whole
+statement corpus including never-executed positions keeps that behavior green.
+
+Validated by 10 fixed differential scoped cases (`tests/test_rust_eval.py`:
+visibility of loop stores through derived contexts, non-scoped invocations not
+seeing them, for-else frames excluding the loop layer, parent loops driving a
+derived invocation whose child override reads the parent's locals and chains
+`super()` across two levels, scoped nested inside block functions where the
+symbol chain ends at that frame, macros defined under a scoped invocation
+closing over the derived context, scoped blocks in macro bodies seeing their
+parameters as dumped stores, required+scoped raising `Required block 'rb' not
+found`, dynamic extends with both branches agreeing) plus the inheritance fuzz
+corpus rerun over seeds 1-5 x600 chains: ok=339 exc=3023 fallbacks=5638
+mismatches=0 -- the scoped reason class disappeared entirely, and what remains
+is exactly the two known deferred classes (duplicate block names within one
+template where python's own codegen fails at compile time, unloadable/unparsable
+extends parents). Statement corpora seeds 1-10 x8k (`scripts/fuzz_v2.py`), the
+macro corpus seeds 1-7 x3k (`scripts/macro_fuzz.py`) and the full suite (991
+tests) all green with the rust core active; `cargo test` unchanged at 17.
+Remaining deferred: parent-side error parity instead of fallback, includes /
+imports as slice C-v5.
 

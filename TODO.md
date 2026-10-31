@@ -81,7 +81,7 @@ criterion.
       Deferred: macros / filter-blocks / call-blocks (`caller()` closures),
       block inheritance and includes (next slices C-v3/C-v4).
 * [X] slice C-v4a (plain block inheritance): extends chains, block invocation with the codegen runtime guards, super()/self via python's own Context.super / TemplateReference, required blocks; scoped blocks, non-string extends targets and un-loadable parents fall back. Validated: 13 fixed differential cases plus `scripts/block_fuzz.py` structured chains (seeds 1-5 x200): ok=58 exc=811 fb=2131, zero mismatches; full suite green.
-* [ ] scoped blocks (`{% block x scoped %}`): derived eval contexts plus the `context.blocks` list copying of `Context.derived`; currently unsupported.
+* [X] slice C-v4b: scoped blocks (`{% block x scoped %}`) implemented in `eval.rs`. A scoped invocation dumps its locals at the call site by merging the live scope frames top-down (inner layers shadow like `find_ref`, owned-but-missing names stay out of the dict and still shadow), stopping after the first boundary frame -- template roots and block functions are generated-function symbol chains that end there. The mapping goes through python's own `Context.derived` (merge over current vars, blocks-list copy, shared eval context). Block functions run with the caller's context object (`BlockFunc.__call__` respects its argument), so derived contexts propagate through `super()`, `TemplateReference`, nested scoped invocations and macro closures (each captures the context current at definition; new `ctxobj` on `Ev`/`MacroFunc`). visit_For's extended-loop forcing by any scoped block below the for node is mirrored (`any_scoped`), including the special loop variable entering the dumped stores. Test-filtered loops in extended/recursive mode are rejected at scan time (mid-execution unsupported reports from inside block/macro bodies could no longer become a clean engine switch). Validated: 10 fixed differential scoped cases incl. visibility contrasts, for-else exclusion, two-level derived `super()` chains, macro-closure capture and required+scoped error parity; block fuzz seeds 1-5 x600 chains green (the scoped fallback class disappeared entirely), statement corpus extended to seeds 1-10 with zero diffs, macro corpus seeds 1-7 green, full suite 991 passed.
 * [ ] parent-side error parity for inheritance (load/parse failures raised as jinja's
       own exceptions instead of falling back)
 * [X] known gap fixed (found by fuzz seed 2, recorded in `scripts/mismatch.txt`):
@@ -98,7 +98,9 @@ criterion.
       generated filter function) -- loads resolve from the context and never
       observe body stores of the same name; unpack-of-undefined parity
       restored.  Recursive loops combined with `if=` fall back until the
-      reciter-wrapping generator exists.  Statement fuzz corpus grown to ~80k
+      reciter-wrapping generator exists (since slice C-v4b such combinations --
+      test filters in extended or recursive mode, incl. scoped-forced extended
+      -- are rejected by the pre-evaluation scan instead of mid-execution).  Statement fuzz corpus grown to ~80k
       templates (seeds 1-10, 8k/seed): zero mismatches.
 * [X] slice C-v3a: filter-block semantics (buffered body in its own scope
       frame, implicit filter target = joined buffer, chain via

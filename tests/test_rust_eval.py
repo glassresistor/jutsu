@@ -72,8 +72,6 @@ UNSUPPORTED = [
     "{{ f(a, *b, **c) }}",
     # extends targets the interpreter cannot resolve without python loaders
     "{% extends 'x' %}",
-    "{# scoped blocks need derived contexts (deferred slice C-v4 follow-up) #}"
-    " {% for i in seq %}{% block it scoped %}{{ i }}{% endblock %}{% endfor %}",
     "{% include 'x' %}",
 ]
 
@@ -839,3 +837,126 @@ def test_macro_expected_semantics():
         assert got is not None, src
         assert got == want, f"{src!r}: {got!r} != {want!r}"
         assert env.from_string(src).render(**macro_vars()) == want
+
+
+# ------------------------------------------------------------- slice C-v4b --
+
+SCOPED = {
+    # scoped invocation inside a loop passes the loop frame's stores through
+    # python's Context.derived; non-scoped invocations resolve against the
+    # plain context, and for-else frames never see the loop layer.
+    "vis": (
+        "{% for i in seq %}{% set w = i %}"
+        "({% block sc scoped %}[{{ i }}:{{ w }}]{% endblock %})"
+        "(<{% block pl %}{{ i }}:{{ w }}>{% endblock %}>){% endfor %}|"
+        "{% for i in [] %}{% else %}"
+        "{% block el scoped %}<{{ i }}>{% endblock %}{% endfor %}"
+    ),
+    # a parent's loop drives the invocation, the child override supplies
+    # content that reads the parent's locals through the derived context;
+    # super() chains onto the layout function registered after it.
+    "layout": (
+        "{%- for i in seq %}{% block sp scoped %}<{{ i }}>"
+        "{% endblock %}{% endfor %}"
+    ),
+    "child": (
+        "{% extends 'layout' %}{% block sp %}[{{ i }}|{{ super() }}]"
+        "{% endblock %}"
+    ),
+    # scoped invocation nested inside a block function: the symbol chain of
+    # the dump ends at that generated function (its own frame has no parents),
+    # but the context object keeps flowing through every derived layer.
+    "d1": (
+        "{%- block outer %}{% for i in seq %}{% block innr scoped %}"
+        "({{ i }}){% endblock %}{% endfor %}{% endblock %}"
+    ),
+    "d2": (
+        "{% extends 'd1' %}{% block outer %}O[{{ super() }}]{% endblock %}"
+        "{%- block innr scoped %}W{{ i }}[{{ super() }}]x{% endblock %}"
+    ),
+    # required + scoped combined with dynamic inheritance
+    "req": (
+        "{% if p %}{% extends 'vis' %}{% else %}{% extends 'layout' %}"
+        "{% endif %}{% block sp scoped required %}{% endblock %}"
+    ),
+    # a standalone required+scoped invocation has no override: same error
+    "rq": "{%- block rb scoped required %}{% endblock %}",
+}
+SCOPED_VARS = {"seq": [1, 2], "x": 3}
+
+
+def check_scoped(name):
+    from jutsu import DictLoader  # noqa: F401
+    envp = Environment(loader=DictLoader(SCOPED))
+    try:
+        p = ("ok", envp.get_template(name).render(**SCOPED_VARS))
+    except Exception as e:  # noqa: BLE001
+        p = ("exc", type(e).__name__, str(e))
+    renv = Environment(loader=DictLoader(SCOPED))
+    try:
+        rv = rust_eval.evaluate(renv, SCOPED[name], name=name,
+                                variables=dict(SCOPED_VARS), templates=SCOPED)
+    except Exception as e:  # noqa: BLE001
+        r = ("exc", type(e).__name__, str(e))
+    else:
+        if isinstance(rv, str):
+            r = ("ok", rv)
+        else:
+            r = "fallback"
+    return p, r
+
+
+def test_scoped_blocks():
+    """Slice C-v4b parity: derived eval contexts for scoped blocks."""
+    from jutsu import DictLoader  # noqa: F401
+
+    for name in ("vis", "layout", "child", "d1", "d2", "rq"):
+        p, r = check_scoped(name)
+        assert r != "fallback", f"{name}: unexpected fallback"
+        assert p == r, f"{name}: {p} != {r}"
+    # dynamic inheritance: both branches must agree with python
+    for var in ({"p": True}, {"p": False}):
+        envp = Environment(loader=DictLoader(SCOPED))
+        try:
+            p = ("ok", envp.get_template("req").render(**var))
+        except Exception as e:  # noqa: BLE001
+            p = ("exc", type(e).__name__, str(e))
+        try:
+            rv = rust_eval.evaluate(
+                Environment(loader=DictLoader(SCOPED)), SCOPED["req"],
+                name="req", variables=dict(var), templates=SCOPED)
+        except Exception as e:  # noqa: BLE001
+            r = ("exc", type(e).__name__, str(e))
+        else:
+            if isinstance(rv, str):
+                r = ("ok", rv)
+            else:
+                r = "fallback"
+        assert p == r, f"req {var}: {p} != {r}"
+
+    env = Environment()
+    srcs = [
+        # scoped visibility of the special loop variable (extended loops are
+        # forced by any scoped block below a for node)
+        "{% for i in seq %}{% block sc3 scoped %}{{ loop.index }}"
+        "{% endblock %}{% endfor %}",
+        # macro defined inside a scoped invocation: its closure is the derived
+        # context, not whatever passes later
+        "{% for v in [4] %}{% block msc scoped %}{% macro g() %}<{{ v }}>"
+        "{% endmacro %}{{ g() }}{% endblock %}{% endfor %}",
+        # scoped inside a macro body: parameters belong to the dumped stores
+        "{% macro m(p) %}{% block mq scoped %}[{{ p }}]{% endblock %}"
+        "{% endmacro %}{{ m(7) }}",
+    ]
+    for src in srcs:
+        env1 = Environment()
+        try:
+            pyv = ("ok", env1.from_string(src).render(seq=[1, 2]))
+        except Exception as e:  # noqa: BLE001
+            pyv = ("exc", type(e).__name__, str(e))
+        rv = rust_eval.evaluate(Environment(), src, variables={"seq": [1, 2]})
+        if isinstance(rv, str):
+            rrv = ("ok", rv)
+        else:
+            rrv = "fallback"
+        assert pyv == rrv, f"{src!r}: {pyv} != {rrv}"

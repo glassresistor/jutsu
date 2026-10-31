@@ -87,6 +87,15 @@ pub struct Ev<'py> {
     /// run a compiled block function body (stores land in `_block_vars`), where
     /// only the local slot chain is written.
     local_only: bool,
+    /// The python `Context` this interpreter resolves against and derives
+    /// scoped contexts from.  It is the render context for the root region,
+    /// but a compiled block function runs with *whatever object its caller
+    /// passed* -- a derived one when reached through a scoped invocation or
+    /// a `super()` reference taken on such an object (slice C-v4b).  Macro
+    /// closures resolve against the context current at their definition,
+    /// mirroring the generated code's closure over the nearest enclosing
+    /// function's `context` variable.
+    ctxobj: Py<PyAny>,
 }
 
 /// The inheritance bookkeeping of the code generator, mirrored at runtime.
@@ -115,6 +124,12 @@ impl Default for BlkFlags {
 /// after the render step that created them has ended.
 pub struct Scope {
     slots: HashMap<String, Option<Py<PyAny>>>,
+    /// True for the frames whose compiled counterpart is a generated function's
+    /// top frame (`Frame(eval_ctx)` with no symbol parent): template roots and
+    /// block functions.  A scoped invocation dumps stores along the symbol
+    /// chain only -- never across such a boundary into whatever happened to be
+    /// live below (slice C-v4b).
+    boundary: bool,
 }
 
 /// Shared evaluator session.  Everything except the per-interpreter scope
@@ -126,7 +141,6 @@ pub struct Scope {
 pub struct Session {
     env: Py<PyAny>,
     evalctx: Py<PyAny>,
-    ctx: Py<PyAny>,
     rt: Py<PyAny>,
     filters: Py<PyDict>,
     tests: Py<PyDict>,
@@ -254,6 +268,11 @@ struct MacroPlan {
 #[pyclass(unsendable)]
 pub struct MacroFunc {
     session: Rc<Session>,
+    /// The python context current at the definition site.  Generated code
+    /// closes over the nearest enclosing function's `context` variable, so a
+    /// macro defined inside a scoped block invocation resolves through that
+    /// derived object for its whole life, not whatever caller passes later.
+    ctxobj: Py<PyAny>,
     chain: Vec<Rc<RefCell<Scope>>>,
     kinds: HashMap<String, IK>,
     params: Vec<(String, Option<Av>)>,
@@ -283,7 +302,12 @@ impl MacroFunc {
 
 impl MacroFunc {
     fn invoke(&self, py: Python<'_>, values: &[Py<PyAny>]) -> Result<Py<PyAny>, EvalErr> {
-        let ev = Ev::with_chain(py, self.session.clone(), self.chain.clone());
+        let ev = Ev::with_chain(
+            py,
+            self.session.clone(),
+            self.chain.clone(),
+            self.ctxobj.clone(),
+        );
         ev.enter_scope(&self.kinds)?;
         let miss = ev.missing();
         for (i, (pname, def)) in self.params.iter().enumerate() {
@@ -444,7 +468,6 @@ impl Session {
         Ok(Rc::new(Session {
             env: env.unbind(),
             evalctx: evalctx.unbind(),
-            ctx: ctx.clone().unbind(),
             rt: rt.clone().unbind(),
             filters: filters.unbind(),
             tests: tests.unbind(),
@@ -480,6 +503,7 @@ impl<'py> Ev<'py> {
             ext_stack: RefCell::new(Vec::new()),
             flags: RefCell::new(BlkFlags::default()),
             local_only: false,
+            ctxobj: ctx.unbind(),
         })
     }
 
@@ -493,6 +517,7 @@ impl<'py> Ev<'py> {
         py: Python<'py>,
         s: Rc<Session>,
         chain: Vec<Rc<RefCell<Scope>>>,
+        ctxobj: Py<PyAny>,
     ) -> Ev<'py> {
         Ev {
             py,
@@ -501,6 +526,7 @@ impl<'py> Ev<'py> {
             ext_stack: RefCell::new(Vec::new()),
             flags: RefCell::new(BlkFlags::default()),
             local_only: false,
+            ctxobj,
         }
     }
 
@@ -531,8 +557,8 @@ impl<'py> Ev<'py> {
 
     /// Interpreter for a compiled block function body: no defining chain (the
     /// generated functions are module level), and stores stay local (`_block_vars`).
-    fn block_ev(py: Python<'py>, s: Rc<Session>) -> Ev<'py> {
-        Ev { py, s, stack: RefCell::new(Vec::new()), ext_stack: RefCell::new(Vec::new()), flags: RefCell::new(BlkFlags::default()), local_only: true }
+    fn block_ev(py: Python<'py>, s: Rc<Session>, ctxobj: Py<PyAny>) -> Ev<'py> {
+        Ev { py, s, stack: RefCell::new(Vec::new()), ext_stack: RefCell::new(Vec::new()), flags: RefCell::new(BlkFlags::default()), local_only: true, ctxobj }
     }
 
     fn env(&self) -> Bound<'py, PyAny> {
@@ -542,7 +568,7 @@ impl<'py> Ev<'py> {
         self.s.evalctx.bind(self.py).clone()
     }
     fn ctx(&self) -> Bound<'py, PyAny> {
-        self.s.ctx.bind(self.py).clone()
+        self.ctxobj.bind(self.py).clone()
     }
     fn rt(&self) -> Bound<'py, PyAny> {
         self.s.rt.bind(self.py).clone()
@@ -633,6 +659,42 @@ impl<'py> Ev<'py> {
             }
         }
         out
+    }
+
+    /// Runtime equivalent of codegen's `dump_local_context`: merge the slots
+    /// owned by the live scope frames from the top down (inner layers shadow,
+    /// like `find_ref`), stopping after the first root-like boundary frame --
+    /// inclusive, since a generated function's own frame is the end of its
+    /// symbol chain.  Slots still holding `missing` stay out of the mapping;
+    /// an owned-but-missing name still shadows outer layers exactly like the
+    /// compiled engine's single reference per name (the dict built later by
+    /// python's `Context.derived` drops missing values itself).
+    fn dump_locals(&self) -> ERes<Bound<'py, PyDict>> {
+        let mut pairs: Vec<(String, Py<PyAny>)> = Vec::new();
+        {
+            let frames = self.stack.borrow();
+            let mut seen: Vec<String> = Vec::new();
+            for frame in frames.iter().rev() {
+                let sc = frame.borrow();
+                for name in sc.slots.keys() {
+                    if seen.iter().any(|s| s == name) {
+                        continue;
+                    }
+                    seen.push(name.clone());
+                    if let Some(Some(v)) = sc.slots.get(name) {
+                        pairs.push((name.clone(), v.clone()));
+                    }
+                }
+                if sc.boundary {
+                    break;
+                }
+            }
+        }
+        let dict = PyDict::new(self.py);
+        for (name, v) in pairs {
+            dict.set_item(name.as_str(), v.bind(self.py))?;
+        }
+        Ok(dict)
     }
 
     /// Value of the nearest owning slot for `name`, walking innermost first.
@@ -1296,11 +1358,20 @@ other => Err(nope(other.to_string())),
             };
             slots.insert(name, v);
         }
-        Ok(Scope { slots })
+        Ok(Scope { slots, boundary: false })
     }
 
     fn enter_scope(&self, kinds: &HashMap<String, IK>) -> ERes<()> {
         let sc = self.init_scope(kinds)?;
+        self.stack.borrow_mut().push(Rc::new(RefCell::new(sc)));
+        Ok(())
+    }
+
+    /// Enter a scope whose compiled counterpart is a generated function's top
+    /// frame (template root or block function): the symbol chain ends there.
+    fn enter_boundary_scope(&self, kinds: &HashMap<String, IK>) -> ERes<()> {
+        let mut sc = self.init_scope(kinds)?;
+        sc.boundary = true;
         self.stack.borrow_mut().push(Rc::new(RefCell::new(sc)));
         Ok(())
     }
@@ -1729,7 +1800,16 @@ other => Err(nope(other.to_string())),
         }
         let ancestors = self.owned_union();
         let mut kinds = self.build_kinds(&occs, &ancestors);
-        let extended = args.len() > 5 && self.deep_name_load_in(body, "loop");
+        // `extended_loop` in visit_For: recursive mode, a body load of the
+        // special loop variable -- or ANY scoped block anywhere below the for
+        // node (codegen's find_all over the whole subtree), because its call
+        // site dumps stores through this loop frame.
+        let mut extended = args.len() > 5 && self.deep_name_load_in(body, "loop");
+        if !extended {
+            let mut scan: Option<bool> = None;
+            any_scoped(args, &mut scan);
+            extended = scan.unwrap_or(false);
+        }
         if extended {
             kinds.insert("loop".to_string(), IK::Param);
         }
@@ -1919,6 +1999,39 @@ other => Err(nope(other.to_string())),
         Ok(self.env().call_method1("concat", (&lst,))?)
     }
 
+    /// Reject for loops whose test filter rides together with extended or
+    /// recursive mode before anything runs.  The python code generator has a
+    /// dedicated reciter-wrapping / LoopContext-over-the-filter-generator
+    /// path for those; reproducing it is deferred (see TODO.md), and deciding
+    /// at scan time keeps the fallback out of block function and macro bodies
+    /// where an unsupported report could no longer turn into a clean engine
+    /// switch.  A scoped block below the for node forces extended mode even
+    /// without any `loop` load, exactly like visit_For's `extended_loop`.
+    fn scan_for(&self, args: &[Av]) -> Result<(), EvalErr> {
+        if args.len() < 6 {
+            return Ok(());
+        }
+        let has_test = !matches!(&args[4], Av::NoneV);
+        if !has_test {
+            return Ok(());
+        }
+        let body: &[Av] = match &args[2] {
+            Av::List(b) => b,
+            _ => &[],
+        };
+        // extended mode is forced by recursion, a load of `loop` in the body
+        // or any scoped block below (codegen's extended_loop condition).
+        let mut scoped: Option<bool> = None;
+        any_scoped(args, &mut scoped);
+        let extended = matches!(&args[5], Av::Bool(true))
+            || self.deep_name_load_in(body, "loop")
+            || scoped == Some(true);
+        if extended {
+            return Err(nope("for with test filter in extended/recursive mode"));
+        }
+        Ok(())
+    }
+
     /// Pre-evaluation scan mirroring the python code generator's compile-time
     /// checks over the *whole* tree: nodes outside the evaluated subset (even
     /// in never-executed positions), missing filter/test names (the compiler
@@ -1992,6 +2105,7 @@ other => Err(nope(other.to_string())),
                     }
                 }
                 if *name == "For" {
+                    self.scan_for(args)?;
                     if let Some(l) = self.find_loop_store(av) {
                         return Err(EvalErr::Exc(
                             self.assertion_error(
@@ -2296,10 +2410,12 @@ other => Err(nope(other.to_string())),
         body: Vec<Av>,
     ) -> ERes<Bound<'py, PyAny>> {
         let chain = self.stack.borrow().clone();
+        let ctxobj = self.ctx().unbind();
         let func = Py::new(
             self.py,
             MacroFunc {
                 session: self.s.clone(),
+                ctxobj,
                 chain,
                 kinds: plan.kinds.clone(),
                 params: plan.params.clone(),
@@ -2505,12 +2621,7 @@ other => Err(nope(other.to_string())),
             Av::Node("Block", _, a) => {
                 let nm_opt = match a.first() { Some(x) => arg_str(x), None => None };
                 if let Some(nm) = nm_opt {
-                    // scoped blocks need the derived eval-context machinery of
-                    // a dedicated slice; required blocks are cheap to mirror.
                     let req = matches!(a.get(3), Some(Av::Bool(true)));
-                    if matches!(a.get(2), Some(Av::Bool(true))) {
-                        return Err(nope(format!("scoped block {:?} defined", nm)));
-                    }
                     if let Some(Av::List(body)) = a.get(1) {
                         out.push((nm.to_string(), body.clone(), req));
                     }
@@ -2730,7 +2841,9 @@ other => Err(nope(other.to_string())),
             }
         }
         // required blocks must have been overridden at least once (the check is
-        // emitted before the invocation, wherever the node was visited).
+        // emitted before the invocation, wherever the node was visited -- and
+        // it reads the *current* context object even for a scoped block: the
+        // generator splices the derived expression only into the call).
         let req = matches!(&args[3], Av::Bool(true));
         let dicts = self.ctx().getattr("blocks")?;
         let lst = self.dict_get(&dicts, name)?;
@@ -2747,14 +2860,23 @@ other => Err(nope(other.to_string())),
         let item0: Bound<'py, PyAny> = {
             let mut seq: Vec<Bound<'py, PyAny>> = Vec::new();
             {
-                let iter = lst.iter()?;
+                let iter = lst.try_iter()?;
                 for item in iter {
                     seq.push(item?);
                 }
             }
             match seq.first() { Some(x) => x.clone(), None => return Err(nope("empty block list")) }
         };
-        let rv = item0.call1((self.ctx(),))?;
+        // a scoped invocation passes `context.derived(locals)` evaluated at the
+        // call site: python's own Context.derived merges them over the current
+        // vars, copies the blocks lists and shares the eval context.
+        let arg: Bound<'py, PyAny> = if matches!(args.get(2), Some(Av::Bool(true))) {
+            let locals = self.dump_locals()?;
+            self.ctx().call_method1("derived", (&locals,))?
+        } else {
+            self.ctx()
+        };
+        let rv = item0.call1((&arg,))?;
         for p in rv.try_iter()? {
             out.push(p?);
         }
@@ -2801,7 +2923,7 @@ other => Err(nope(other.to_string())),
             kinds.insert("self".to_string(), IK::Param);
         }
         let re = Rc::new(RootExec { any_extends: unit.any_extends, extended: RefCell::new(false), parent: RefCell::new(None) });
-        self.enter_scope(&kinds)?;
+        self.enter_boundary_scope(&kinds)?;
         if uses_self {
             let trefcls = self.rt().getattr("TemplateReference")?;
             let obj = trefcls.call1((self.ctx(),))?;
@@ -2879,6 +3001,28 @@ fn body_of(args: &[Av]) -> &[Av] {
 }
 
 
+/// True if a scoped `{% block %}` node appears anywhere below the nodes in
+/// `args` (codegen's `any(block.scoped for block in node.find_all(nodes.Block))`
+/// in visit_For).  Descends through everything, blocks included.
+fn any_scoped(args: &[Av], found: &mut Option<bool>) {
+    if *found == Some(true) {
+        return;
+    }
+    for av in args {
+        match av {
+            Av::List(inner) | Av::Tuple(inner) => any_scoped(inner, found),
+            Av::Node(name, _, a) => {
+                if *name == "Block" && matches!(a.get(2), Some(Av::Bool(true))) {
+                    *found = Some(true);
+                    return;
+                }
+                any_scoped(a, found);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// True if any node named `want` appears below `av` (`Node.find`).
 fn has_node_named(av: &Av, want: &str) -> bool {
     match av {
@@ -2908,8 +3052,12 @@ pub struct BlockFunc {
 
 impl BlockFunc {
     /// Render this block function's body against the shared session context.
-    fn render_parts<'py>(&self, py: Python<'py>) -> Result<Vec<Bound<'py, PyAny>>, EvalErr> {
-        let ev = Ev::block_ev(py, self.session.clone());
+    fn render_parts<'py>(
+        &self,
+        py: Python<'py>,
+        context: &Bound<'py, PyAny>,
+    ) -> Result<Vec<Bound<'py, PyAny>>, EvalErr> {
+        let ev = Ev::block_ev(py, self.session.clone(), context.clone().unbind());
         let mut occs: Vec<Occ> = Vec::new();
         for it in &self.body {
             ev.walk_fsf(it, &mut occs);
@@ -2923,7 +3071,7 @@ impl BlockFunc {
                 }
             }
         }
-        ev.enter_scope(&kinds)?;
+        ev.enter_boundary_scope(&kinds)?;
         if self.uses_super {
             let me = self
                 .session
@@ -2955,15 +3103,16 @@ impl BlockFunc {
 
 #[pymethods]
 impl BlockFunc {
-    /// Invoked with the live context, either directly from a root region or
-    /// through python's `BlockReference.__call__`; returns the finalized parts.
-    #[pyo3(signature = (_context))]
+    /// Invoked with the calling context, either directly from a root region,
+    /// through python's `BlockReference.__call__`, or as a scoped invocation
+    /// that passes a freshly derived one; returns the finalized parts.
+    #[pyo3(signature = (context))]
     fn __call__<'p>(
         &self,
         py: Python<'p>,
-        _context: &Bound<'p, PyAny>,
+        context: &Bound<'p, PyAny>,
     ) -> PyResult<Py<PyAny>> {
-        match self.render_parts(py) {
+        match self.render_parts(py, context) {
             Ok(parts) => Ok(PyList::new(py, parts)?.into_any().unbind()),
             Err(EvalErr::Exc(e)) => Err(e),
             Err(EvalErr::Unsupported(u)) => Err(pyo3::exceptions::PyRuntimeError::new_err(
