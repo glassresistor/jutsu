@@ -24,7 +24,7 @@ the existing Jinja2 extensions and ecosystem.
 | Rust lexer (`crates/jutsu-core/src/lexer.rs`) | **done and wired into `Lexer.tokeniter`** |
 | Rust parser (`crates/jutsu-core/src/parser.rs`) | **done and wired into `Parser.parse`** (default on; `JUTSU_RUST_PARSER=0` switches back) |
 | Packaging (maturin wheel with rust core) | done (`maturin build -r -m crates/jutsu-core/Cargo.toml`) |
-| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | **slice C-v2/C-v3a/C-v3b: statements, scoping and macros/call blocks evaluate fully in rust** -- if/elif/else, for (incl. `if=` test filters, else branches, recursive loops with `loop()` recursion, full LoopContext features), set/set-block(+filter), filter blocks, with, namespace refs, `{% macro %}` / `{% call %}` with caller/kwargs/varargs closures; compiled-engine scope semantics reproduced (slot frames, alias-copy on store, per-scope resolve loads, root writeback+exported_vars). Not wired into `Template.render` yet; validated differentially incl. exception type/message parity |
+| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | **slice C-v2/C-v3a/C-v3b/C-v4a: statements, scoping and macros/call blocks evaluate fully in rust** -- if/elif/else, for (incl. `if=` test filters, else branches, recursive loops with `loop()` recursion, full LoopContext features), set/set-block(+filter), filter blocks, with, namespace refs, `{% macro %}` / `{% call %}` with caller/kwargs/varargs closures; compiled-engine scope semantics reproduced (slot frames, alias-copy on store, per-scope resolve loads, root writeback+exported_vars). Slice C-v4a adds plain block inheritance: `{% extends %}` chains, block invocation with the code generator's runtime guards (`extends_so_far`/`has_known_extends`), `super()` through python's own `Context.super` and `BlockReference`, `self` via `TemplateReference`, required blocks; scoped blocks fall back).) Not wired into `Template.render` yet; validated differentially incl. exception type/message parity |
 | Code generator / runtime | still python (next targets: block inheritance, includes/imports) |
 
 The lexer port is validated three ways:
@@ -246,3 +246,40 @@ original seed-2 template plus fuzz seeds 1-3 x8k and the full suite.
 
 Tests run against `src/` directly via pytest's `pythonpath = ["src"]`, so no
 install step is required during development.
+
+
+## Evaluator port notes (slice C-v4a)
+
+Plain template inheritance now runs inside rust: `{% extends %}` chains, block
+invocation with the code generator's runtime guards (`extends_so_far` /
+`has_known_extends`, mirrored dynamically because a non-executed branch that
+contains an `extends` has no observable effect anyway), `super()` implemented by
+registering the rust block functions into python's own `Context.blocks` so
+python's `Context.super` / `BlockReference` -- including the "there is no parent
+block called ..." undefined message and repeated renders -- run unchanged, and
+`self` via a real `runtime.TemplateReference`. Required blocks check their list
+length before invoking, raising the same translated `TemplateRuntimeError`.
+
+Scoping follows codegen: block functions get an independent symbol table (loads
+always resolve from the python context, stores stay local through the new
+`local_only` marker), while soft frames of `if` preserve toplevel/rootlevel and
+every other construct resets them -- matching which nested blocks are guarded or
+dropped. Extends is only legal where codegen accepts it (root body or inside
+`if` branches); anything below a block/macro/call-block boundary falls back, as
+do scoped blocks (derived eval contexts), non-string extends targets and parents
+that cannot be loaded/parsed from the provided sources -- python's loaders stay
+in charge for those either way.
+
+Validated by 13 fixed differential inheritance cases in `tests/test_rust_eval.py`
+(multi-level chains, nested overrides, super at every level including repeated
+calls, self references before and after override definitions, required blocks
+both ways, dynamic extends through variables) plus a structured fuzz corpus of
+random two/three-level template chains (`scripts/block_fuzz.py`, seeds 1-5 with
+200 chains each): ok=58 exc=811 fallbacks=2131 mismatches=0; the only fallback
+reason classes in the whole corpus are scoped blocks, duplicate block names
+within one template (python's own compile-time failure) and extends parents that
+are not provided or cannot be parsed -- where python raises too. Full suite 990
+passed with the rust core active. Deferred follow-ups: scoped blocks' derived
+context semantics, parent-side error parity instead of fallback, includes /
+imports (`{% include %}`, `{% import %}`) as slice C-v5.
+

@@ -31,20 +31,40 @@ def make_context(environment, variables=None, name=None, globals_=None):
     )
 
 
-def evaluate(environment, source, name=None, filename=None, variables=None):
+def prepare_sources(environment, templates):
+    """Wrap every extra template source into the same token form the rust core
+    consumes.  A source that cannot be tokenized cleanly is passed through as
+    ``None`` so the evaluator knows to fall back when it reaches for it.
+    """
+    if templates is None:
+        return None
+    out: dict[str, object] = {}
+    for tname, tsrc in templates.items():
+        toks, lexerr = wrapped_tokens(environment, tsrc, tname, None)
+        out[tname] = None if lexerr is not None else toks
+    return out
+
+
+def evaluate(environment, source, name=None, filename=None, variables=None,
+            templates=None, with_reason=False):
     """Render ``source`` with the rust evaluator.
 
     Returns the rendered text, or ``None`` when the template uses nodes this
     slice cannot evaluate.  Parse/lexer errors are raised as the usual jinja
-    exceptions and runtime errors propagate untouched.
+    exceptions and runtime errors propagate untouched.  ``templates`` maps
+    extra template names to their sources so that `{% extends %}` can be
+    followed inside rust without going through python's loaders.
     """
     toks, lexerr = wrapped_tokens(environment, source, name, filename)
     ctx = make_context(environment, variables, name)
-    res = _jutsu.eval_template(toks, lexerr, ctx, _runtime, name)
+    srcs = prepare_sources(environment, templates)
+    res = _jutsu.eval_template(toks, lexerr, ctx, _runtime, name, srcs)
     kind = res[0]
     if kind == "__okrender__":
         return res[1]
     if kind == "__unsupported__":
+        if with_reason:
+            return None, res[1]
         return None
     if kind == "__lexerr__":
         exc = TemplateSyntaxError(*res[1])

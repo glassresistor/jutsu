@@ -80,8 +80,10 @@ criterion.
       (3 seeds) with exception type/message parity -- zero mismatches.
       Deferred: macros / filter-blocks / call-blocks (`caller()` closures),
       block inheritance and includes (next slices C-v3/C-v4).
-* [ ] block inheritance machinery (super(), blocks dict, scoped blocks,
-      required blocks) ported onto the interpreter
+* [X] slice C-v4a (plain block inheritance): extends chains, block invocation with the codegen runtime guards, super()/self via python's own Context.super / TemplateReference, required blocks; scoped blocks, non-string extends targets and un-loadable parents fall back. Validated: 13 fixed differential cases plus `scripts/block_fuzz.py` structured chains (seeds 1-5 x200): ok=58 exc=811 fb=2131, zero mismatches; full suite green.
+* [ ] scoped blocks (`{% block x scoped %}`): derived eval contexts plus the `context.blocks` list copying of `Context.derived`; currently unsupported.
+* [ ] parent-side error parity for inheritance (load/parse failures raised as jinja's
+      own exceptions instead of falling back)
 * [X] known gap fixed (found by fuzz seed 2, recorded in `scripts/mismatch.txt`):
       symbol occurrence merging across if-branches.  The occurrence walk now
       collects structured occurrences (`Occ::Branch` groups per `if`), and the

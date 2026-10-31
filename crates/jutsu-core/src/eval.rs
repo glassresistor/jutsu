@@ -19,7 +19,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use pyo3::IntoPyObjectExt;
 
-use crate::parser::Av;
+use crate::parser::{Av, PToken, RtParser};
 use crate::pyrepr::py_repr_str;
 
 pyo3::import_exception!(jutsu.exceptions, TemplateRuntimeError);
@@ -76,6 +76,37 @@ pub struct Ev<'py> {
     /// `Rc` so closures captured at a macro definition keep seeing the live
     /// slot objects even after this interpreter instance has finished.
     stack: RefCell<Vec<Rc<RefCell<Scope>>>>,
+    /// Root executions currently in progress (innermost last), mirroring the
+    /// generated `parent_template` local of every root render function.
+    ext_stack: RefCell<Vec<Rc<RootExec>>>,
+    /// Code-generator flags tracked dynamically over the executed traversal of
+    /// a root region (`extends_so_far`, `has_known_extends`, `frame.toplevel`
+    /// and `frame.rootlevel`); see slice C-v4 in PLAN_INTERP.md.
+    flags: RefCell<BlkFlags>,
+    /// Stores never reach back into `context.vars`: true for interpreters that
+    /// run a compiled block function body (stores land in `_block_vars`), where
+    /// only the local slot chain is written.
+    local_only: bool,
+}
+
+/// The inheritance bookkeeping of the code generator, mirrored at runtime.
+/// Every executed `{% extends %}` marks `seen_any`; one located directly in a
+/// root body additionally marks `known_top` (the generator's
+/// `has_known_extends`, which drops all later top-level output and block
+/// invocations).  `chain_top`/`chain_root` mirror the frame flags: soft frames
+/// from `if` preserve them, every other construct resets.
+#[derive(Clone, Copy)]
+pub struct BlkFlags {
+    seen_any: bool,
+    known_top: bool,
+    chain_top: bool,
+    chain_root: bool,
+}
+
+impl Default for BlkFlags {
+    fn default() -> Self {
+        BlkFlags { seen_any: false, known_top: false, chain_top: false, chain_root: false }
+    }
 }
 
 /// One runtime scope frame: slots by name; `None` is the `missing` sentinel.
@@ -112,6 +143,17 @@ pub struct Session {
     name: Option<String>,
     /// Loop contexts created for recursive loops, awaiting recursive calls.
     rec: RefCell<Vec<RecEntry>>,
+    /// Next block function id (slice C-v4).  A block body needs to hand its own
+    /// python callable object to `Context.super`, whose index lookup compares
+    /// identities; the side table lets a function find *itself* without a
+    /// recursive rust handle.
+    next_blk: RefCell<usize>,
+    blocks_reg: RefCell<HashMap<usize, Py<PyAny>>>,
+    /// Extra template sources for `{% extends %}`, already wrapped into token
+    /// form; a name mapped to `None` marks a source that cannot even be lexed.
+    srcs: std::collections::HashMap<String, Option<Vec<PToken>>>,
+    /// Parsed and prepared units by template name (slice C-v4).
+    units: RefCell<HashMap<String, Rc<UnitInfo>>>,
 }
 
 /// How a slot is initialized when its scope is entered (mirrors the code
@@ -130,13 +172,41 @@ struct RecEntry {
     args: Vec<Av>,
 }
 
+/// Runtime state of one template root execution, mirroring the generated
+/// `parent_template` local inside each template's root render function.
+pub struct RootExec {
+    /// Whether this template contains an `{% extends %}` anywhere at all (the
+    /// code generator's `have_extends`, which puts a runtime check in front of
+    /// every top-level output).
+    any_extends: bool,
+    /// Whether the parent has been loaded already (`parent_template is not None`).
+    extended: RefCell<bool>,
+    /// The prepared parent unit, to be rendered after this body finishes.
+    parent: RefCell<Option<Rc<UnitInfo>>>,
+}
+
+/// A parsed and prepared template unit (the interpreter's equivalent of a
+/// compiled template module: its tree plus the block functions it registers).
+pub struct UnitInfo {
+    /// The parsed `Template` node.
+    tree: Av,
+    /// Block names in document order (`find_all(nodes.Block)`).  Nested blocks
+    /// belong to their own template's registry exactly like codegen does.
+    names: Vec<String>,
+    /// One callable per collected block, same order as `names`.
+    funcs: Vec<Py<PyAny>>,
+    /// Whether this template mentions `{% extends %}` anywhere.
+    any_extends: bool,
+}
+
+
 /// Node names the evaluator understands (expressions plus C-v2 statements).
 pub const SUPPORTED_NODES: &[&str] = &[
     "Const", "TemplateData", "Name", "Getattr", "Getitem", "Tuple", "List", "Dict",
     "Pair", "CondExpr", "Or", "And", "Not", "Compare", "Operand", "Concat", "Call",
     "Filter", "Test", "Add", "Sub", "Mul", "Div", "FloorDiv", "Mod", "Pow", "Pos",
     "Neg", "Slice", "Keyword", "Output", "If", "Assign", "AssignBlock", "FilterBlock",
-    "For", "With", "NSRef", "Template", "Macro", "CallBlock",
+    "For", "With", "NSRef", "Template", "Macro", "CallBlock", "Extends", "Block",
 ];
 
 /// Occurrence kinds collected by the scope symbol walk.
@@ -333,6 +403,7 @@ impl Session {
         ctx: &Bound<'_, PyAny>,
         rt: &Bound<'_, PyAny>,
         name: Option<String>,
+        srcs: std::collections::HashMap<String, Option<Vec<PToken>>>,
     ) -> Result<Rc<Session>, EvalErr> {
         let env = ctx.getattr("environment")?;
         let evalctx = ctx.getattr("eval_ctx")?;
@@ -385,6 +456,10 @@ impl Session {
             autoescape,
             name,
             rec: RefCell::new(Vec::new()),
+            next_blk: RefCell::new(0),
+            blocks_reg: RefCell::new(HashMap::new()),
+            srcs,
+            units: RefCell::new(HashMap::new()),
         }))
     }
 }
@@ -395,21 +470,69 @@ impl<'py> Ev<'py> {
         ctx: Bound<'py, PyAny>,
         rt: Bound<'py, PyAny>,
         name: Option<String>,
+        srcs: std::collections::HashMap<String, Option<Vec<PToken>>>,
     ) -> Result<Ev<'py>, EvalErr> {
-        let s = Session::build(py, &ctx, &rt, name)?;
-        Ok(Ev { py, s, stack: RefCell::new(Vec::new()) })
+        let s = Session::build(py, &ctx, &rt, name, srcs)?;
+        Ok(Ev {
+            py,
+            s,
+            stack: RefCell::new(Vec::new()),
+            ext_stack: RefCell::new(Vec::new()),
+            flags: RefCell::new(BlkFlags::default()),
+            local_only: false,
+        })
     }
 
     /// Interpreter over a captured session and defining frame chain: used by
     /// macro / caller closures (slice C-v3b) whose bodies evaluate against
-    /// where they were defined, never the caller's live stack.
+    /// where they were defined, never the caller's live stack.  Block functions
+    /// (slice C-v4) use the same mechanism with an empty chain: compiled block
+    /// functions are module-level and inherit nothing from their caller.
     #[allow(dead_code)]
     pub fn with_chain(
         py: Python<'py>,
         s: Rc<Session>,
         chain: Vec<Rc<RefCell<Scope>>>,
     ) -> Ev<'py> {
-        Ev { py, s, stack: RefCell::new(chain) }
+        Ev {
+            py,
+            s,
+            stack: RefCell::new(chain),
+            ext_stack: RefCell::new(Vec::new()),
+            flags: RefCell::new(BlkFlags::default()),
+            local_only: false,
+        }
+    }
+
+    /// Mapping lookup that treats a missing key as python's `None` instead of
+    /// raising (generic `get_item` on a non-dict mapping raises KeyError).
+    fn dict_get(&self, d: &Bound<'py, PyAny>, key: &str) -> Result<Bound<'py, PyAny>, PyErr> {
+        match d.get_item(key) {
+            Ok(v) => Ok(v),
+            Err(e) if e.is_instance_of::<pyo3::exceptions::PyKeyError>(self.py) => Ok(self.none()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Child frames from loops, with / filter / set blocks lose both frame flags.
+    fn enter_body_flags(&self) {
+        let mut nf = *self.flags.borrow();
+        nf.chain_top = false;
+        nf.chain_root = false;
+        *self.flags.borrow_mut() = nf;
+    }
+
+    /// Soft frames from an `if` keep toplevel but lose rootlevel.
+    fn enter_if_flags(&self) {
+        let mut nf = *self.flags.borrow();
+        nf.chain_root = false;
+        *self.flags.borrow_mut() = nf;
+    }
+
+    /// Interpreter for a compiled block function body: no defining chain (the
+    /// generated functions are module level), and stores stay local (`_block_vars`).
+    fn block_ev(py: Python<'py>, s: Rc<Session>) -> Ev<'py> {
+        Ev { py, s, stack: RefCell::new(Vec::new()), ext_stack: RefCell::new(Vec::new()), flags: RefCell::new(BlkFlags::default()), local_only: true }
     }
 
     fn env(&self) -> Bound<'py, PyAny> {
@@ -1207,21 +1330,7 @@ other => Err(nope(other.to_string())),
         items.iter().any(|a| self.deep_name_load(a, target))
     }
 
-    fn exec_template(&self, args: &[Av], out: &mut Vec<Bound<'py, PyAny>>) -> ERes<()> {
-        let items = match args.first() {
-            Some(Av::List(l)) => l,
-            _ => return Err(nope("bad template body")),
-        };
-        let mut occs: Vec<Occ> = Vec::new();
-        for it in items {
-            self.walk_fsf(it, &mut occs);
-        }
-        let kinds = self.build_kinds(&occs, &[]);
-        self.enter_scope(&kinds)?;
-        self.exec_items(items, out)?;
-        self.pop_scope();
-        Ok(())
-    }
+
 
     fn exec_items(&self, items: &[Av], out: &mut Vec<Bound<'py, PyAny>>) -> ERes<()> {
         for it in items {
@@ -1236,7 +1345,23 @@ other => Err(nope(other.to_string())),
             _ => return Err(nope("statement node expected")),
         };
         match name {
+            // Top-level output of a template that mentions `{% extends %}` is
+            // guarded at runtime by the `parent_template` check, or dropped
+            // entirely once a root level extend was visited before it.
             "Output" => {
+                if !self.ext_stack.borrow().is_empty() {
+                    let known = self.flags.borrow().known_top;
+                    let extended: bool = {
+                        let st = self.ext_stack.borrow();
+                        match st.last() {
+                            Some(re) => *re.extended.borrow() && re.any_extends,
+                            None => false,
+                        }
+                    };
+                    if known || extended {
+                        return Ok(());
+                    }
+                }
                 let items = match args.first() {
                     Some(Av::List(l)) => l,
                     _ => return Err(nope("bad output node")),
@@ -1290,7 +1415,10 @@ other => Err(nope(other.to_string())),
                     }
                 }
                 match chosen {
-                    Some(b) => self.exec_items(b, out),
+                    Some(b) => {
+                        self.enter_if_flags();
+                        self.exec_items(b, out)
+                    }
                     None => Ok(()),
                 }
             }
@@ -1307,6 +1435,8 @@ other => Err(nope(other.to_string())),
             "With" => self.exec_with(args, out),
             "Macro" => self.exec_macro(args),
             "CallBlock" => self.exec_call_block(args, out),
+            "Extends" => self.exec_extends(args),
+            "Block" => self.exec_block(args, out),
             _ => Err(nope(format!("{name} statement outside the subset"))),
         }
     }
@@ -1336,7 +1466,7 @@ other => Err(nope(other.to_string())),
         let mut names: Vec<String> = Vec::new();
         self.target_names(tgt, &mut names);
         self.store_target(tgt, &val, false)?;
-        if !names.is_empty() && self.stack.borrow().len() == 1 {
+        if !names.is_empty() && self.stack.borrow().len() == 1 && !self.local_only {
             let vars = self.ctx().getattr("vars")?;
             for name in &names {
                 if let Some(Some(vv)) = self.nearest_slot(name) {
@@ -1497,6 +1627,7 @@ other => Err(nope(other.to_string())),
         args: &[Av],
         out: &mut Vec<Bound<'py, PyAny>>,
     ) -> ERes<()> {
+        self.enter_body_flags();
         if args.len() < 2 {
             return Err(nope("bad filter block"));
         }
@@ -1545,6 +1676,7 @@ other => Err(nope(other.to_string())),
     }
 
     fn exec_assign_block(&self, args: &[Av]) -> ERes<()> {
+        self.enter_body_flags();
         if args.len() < 3 {
             return Err(nope("bad assign block"));
         }
@@ -1617,6 +1749,7 @@ other => Err(nope(other.to_string())),
     }
 
     fn exec_for(&self, args: &[Av], out: &mut Vec<Bound<'py, PyAny>>) -> ERes<()> {
+        self.enter_body_flags();
         if args.len() < 6 {
             return Err(nope("bad for node"));
         }
@@ -1972,6 +2105,7 @@ other => Err(nope(other.to_string())),
     }
 
     fn exec_with(&self, args: &[Av], out: &mut Vec<Bound<'py, PyAny>>) -> ERes<()> {
+        self.enter_body_flags();
         if args.len() < 3 {
             return Err(nope("bad with node"));
         }
@@ -2217,7 +2351,7 @@ other => Err(nope(other.to_string())),
         if !stored {
             return Err(nope(format!("store to unowned name {name:?}")));
         }
-        if self.stack.borrow().len() == 1 {
+        if self.stack.borrow().len() == 1 && !self.local_only {
             let vars = self.ctx().getattr("vars")?;
             vars.set_item(name, val)?;
             if !name.starts_with('_') {
@@ -2301,12 +2435,545 @@ other => Err(nope(other.to_string())),
         out.push(self.out_str(&rv)?);
         Ok(())
     }
+    // ------------------------------------------------------- slice C-v4 --
+    //
+    // Block inheritance.  `{% extends %}` loads a prepared parent unit and
+    // appends its own block functions into `context.blocks` exactly like the
+    // generated code does; block invocations always take index 0 of that
+    // registry (the most derived override), and `super()` is python's own
+    // `Context.super` / `BlockReference`, so parent lookup, arity and error
+    // messages are byte-identical by construction.  The code generator's
+    // compile-time flags (`extends_so_far`, `has_known_extends`, the frame
+    // toplevel/rootlevel pair) are mirrored over the *executed* traversal: a
+    // branch that never runs contributes nothing observable, so counting only
+    // executed extends matches codegen wherever behaviour can differ.
+
+    /// UndeclaredNameVisitor-style detection of `self` / `super` inside one
+    /// function scope (a root body excluding blocks, or a block's own body):
+    /// a load marks the name as accessed, any other occurrence drops it from
+    /// further consideration afterwards -- python's discard behaviour.  The
+    /// walk stops at nested `{% block %}` nodes like `visit_Block` does.
+    fn undecl_specials(&self, items: &[Av]) -> (bool, bool) {
+        let mut track = [true, true];
+        let mut found = [false, false];
+        for it in items {
+            self.spec2_walk(it, &mut track, &mut found);
+        }
+        (found[0], found[1])
+    }
+
+    fn spec2_walk(&self, av: &Av, track: &mut [bool; 2], found: &mut [bool; 2]) {
+        match av {
+            Av::List(inner) | Av::Tuple(inner) => {
+                for a in inner {
+                    self.spec2_walk(a, track, found);
+                }
+            }
+            Av::Node("Block", _, _) => {}
+            Av::Node("Name", _, a) => {
+                if a.len() >= 2 {
+                    let Some(n) = arg_str(&a[0]) else { return };
+                    for (i, special) in ["self", "super"].iter().enumerate() {
+                        if n == *special && track[i] {
+                            if arg_str(&a[1]) == Some("load") {
+                                found[i] = true;
+                            } else {
+                                track[i] = false;
+                            }
+                        }
+                    }
+                }
+            }
+            Av::Node(_, _, a) => {
+                for x in a {
+                    self.spec2_walk(x, track, found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Collect every `{% block %}` node below `av` (codegen's
+    /// `find_all(nodes.Block)`), including blocks nested inside other bodies.
+    fn collect_blocks(&self, av: &Av, out: &mut Vec<(String, Vec<Av>, bool)>) -> Result<(), EvalErr> {
+        match av {
+            Av::List(inner) | Av::Tuple(inner) => {
+                for a in inner {
+                    self.collect_blocks(a, out)?;
+                }
+            }
+            Av::Node("Block", _, a) => {
+                let nm_opt = match a.first() { Some(x) => arg_str(x), None => None };
+                if let Some(nm) = nm_opt {
+                    // scoped blocks need the derived eval-context machinery of
+                    // a dedicated slice; required blocks are cheap to mirror.
+                    let req = matches!(a.get(3), Some(Av::Bool(true)));
+                    if matches!(a.get(2), Some(Av::Bool(true))) {
+                        return Err(nope(format!("scoped block {:?} defined", nm)));
+                    }
+                    if let Some(Av::List(body)) = a.get(1) {
+                        out.push((nm.to_string(), body.clone(), req));
+                    }
+                }
+                self.collect_blocks_children(av, out)?;
+            }
+            Av::Node(_, _, a) => {
+                for x in a {
+                    self.collect_blocks(x, out)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn collect_blocks_children(&self, av: &Av, out: &mut Vec<(String, Vec<Av>, bool)>) -> Result<(), EvalErr> {
+        if let Av::Node(_, _, a) = av {
+            for x in a {
+                self.collect_blocks(x, out)?;
+            }
+        } else if let Av::List(inner) | Av::Tuple(inner) = av {
+            for x in inner {
+                self.collect_blocks(x, out)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject constructs whose compiled counterparts cannot be reproduced: an
+    /// `{% extends %}` inside a closure frame (macro / call block / another
+    /// block body) is a compile-time failure in python and stays unsupported.
+    fn check_layout(&self, av: &Av, toplevel_ok: bool) -> Result<(), EvalErr> {
+        match av {
+            Av::List(inner) | Av::Tuple(inner) => {
+                for x in inner {
+                    self.check_layout(x, toplevel_ok)?;
+                }
+            }
+            // the root body region starts with a toplevel frame.
+            Av::Node("Template", _, a) => {
+                for x in a {
+                    self.check_layout(x, true)?;
+                }
+            }
+            Av::Node("Extends", _, _) => {
+                if !toplevel_ok {
+                    return Err(nope(
+                        "extends below a non-toplevel frame (python fails with \"cannot \
+                         use extend from a non top-level scope\")",
+                    ));
+                }
+            }
+            // soft frames from `if` keep toplevel; every other construct loses it.
+            Av::Node("If", _, a) => {
+                for x in a {
+                    self.check_layout(x, toplevel_ok)?;
+                }
+            }
+            Av::Node(_, _, a) => {
+                for x in a {
+                    self.check_layout(x, false)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Prepare one parsed template into a unit: create its block functions in
+    /// document order and reject duplicate names within the same template (the
+    /// code generator's `block 'x' defined twice` compile-time failure).
+    fn prepare_unit(&self, tree: &Av) -> Result<Rc<UnitInfo>, EvalErr> {
+        let mut found: Vec<(String, Vec<Av>, bool)> = Vec::new();
+        self.collect_blocks(tree, &mut found)?;
+        let any_extends = has_node_named(tree, "Extends");
+        let mut names: Vec<String> = Vec::new();
+        let mut funcs: Vec<Py<PyAny>> = Vec::new();
+        for (nm, body, _req) in found {
+            if names.iter().any(|n| n == &nm) {
+                return Err(nope(format!("block {:?} defined twice", nm)));
+            }
+            let (us_self, us_super) = self.undecl_specials(&body);
+            let id = {
+                let mut n = self.s.next_blk.borrow_mut();
+                *n += 1;
+                *n
+            };
+            let func: Py<PyAny> = Py::new(
+                self.py,
+                BlockFunc {
+                    session: self.s.clone(),
+                    name: nm.to_string(),
+                    body,
+                    uses_super: us_super,
+                    uses_self: us_self,
+                    id,
+                },
+            )?
+            .into_any();
+            self.s.blocks_reg.borrow_mut().insert(id, func.clone());
+            names.push(nm.to_string());
+            funcs.push(func);
+        }
+        Ok(Rc::new(UnitInfo { tree: tree.clone(), names, funcs, any_extends }))
+    }
+
+    /// Register a unit's own block functions into `context.blocks`.  The top
+    /// template starts from `{k: [v]}` (python's `Context.__init__`), every
+    /// extend appends the parent's entries at the end of each list.
+    fn register_blocks(&self, unit: &UnitInfo, append_last: bool) -> Result<(), PyErr> {
+        let dicts = self.ctx().getattr("blocks")?;
+        for (name, f) in unit.names.iter().zip(unit.funcs.iter()) {
+            let existing = self.dict_get(&dicts, name)?;
+            if append_last && !existing.is_none() {
+                existing.call_method1("append", (f,))?;
+            } else {
+                let nl = PyList::empty(self.py);
+                nl.append(f)?;
+                dicts.set_item(name.as_str(), &nl)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Load, parse and prepare a parent template reached through `{% extends %}`.
+    fn get_unit(&self, name: &str) -> Result<Rc<UnitInfo>, EvalErr> {
+        if let Some(u) = self.s.units.borrow().get(name).cloned() {
+            return Ok(u);
+        }
+        let toks = match self.s.srcs.get(name) {
+            Some(Some(t)) => t.clone(),
+            _ => return Err(nope(format!("extends source {:?} not provided", name))),
+        };
+        let mut rp = RtParser::new(toks, None);
+        let tree = match rp.parse() {
+            Ok(t) => t,
+            Err(_) => return Err(nope("parent parse error")),
+        };
+        self.scan(&tree)?;
+        self.check_layout(&tree, true)?;
+        let unit = self.prepare_unit(&tree)?;
+        self.s.units.borrow_mut().insert(name.to_string(), unit.clone());
+        Ok(unit)
+    }
+
+    /// `{% extends %}`: raise `extended multiple times` exactly where the code
+    /// generator writes it -- unconditionally after a known top-level extend,
+    /// otherwise behind its runtime guard -- then load and append.
+    fn exec_extends(&self, args: &[Av]) -> ERes<()> {
+        if self.ext_stack.borrow().is_empty() {
+            return Err(nope("extends outside a root region"));
+        }
+        let f = *self.flags.borrow();
+        if f.known_top {
+            return Err(EvalErr::Exc(PyErr::new::<TemplateRuntimeError, _>(
+                "extended multiple times",
+            )));
+        }
+        if f.chain_top && f.seen_any {
+            let already: bool = {
+                let st = self.ext_stack.borrow();
+                match st.last() { Some(re) => *re.extended.borrow(), None => false }
+            };
+            if already {
+                return Err(EvalErr::Exc(PyErr::new::<TemplateRuntimeError, _>(
+                    "extended multiple times",
+                )));
+            }
+        }
+        let val = self.node(&args[0])?;
+        let tname: String = match val.extract::<String>() {
+            Ok(s) => s,
+            Err(_) => return Err(nope("non-string extends target")),
+        };
+        let unit = self.get_unit(&tname)?;
+        self.register_blocks(&unit, true)?;
+        {
+            let mut nf = *self.flags.borrow();
+            nf.seen_any = true;
+            if f.chain_root {
+                nf.known_top = true;
+            }
+            *self.flags.borrow_mut() = nf;
+        }
+        {
+            let st = self.ext_stack.borrow();
+            if let Some(re) = st.last() {
+                re.extended.replace(true);
+                *re.parent.borrow_mut() = Some(unit);
+            }
+        }
+        Ok(())
+    }
+
+    /// A block invocation.  Codegen drops it entirely after a known top-level
+    /// extend, guards it when the frame chain kept `toplevel` and extends were
+    /// seen before, and always calls index 0 of the registry: the most derived
+    /// override registered so far.
+    fn exec_block(&self, args: &[Av], out: &mut Vec<Bound<'py, PyAny>>) -> ERes<()> {
+        if args.len() < 4 {
+            return Err(nope("bad block node"));
+        }
+        let Some(name) = arg_str(&args[0]) else { return Err(nope("block name")) };
+        if !self.ext_stack.borrow().is_empty() {
+            let f = *self.flags.borrow();
+            if f.known_top {
+                return Ok(());
+            }
+            if f.chain_top && f.seen_any {
+                let st = self.ext_stack.borrow();
+                let already = match st.last() { Some(re) => *re.extended.borrow(), None => false };
+                drop(st);
+                if already {
+                    return Ok(());
+                }
+            }
+        }
+        // required blocks must have been overridden at least once (the check is
+        // emitted before the invocation, wherever the node was visited).
+        let req = matches!(&args[3], Av::Bool(true));
+        let dicts = self.ctx().getattr("blocks")?;
+        let lst = self.dict_get(&dicts, name)?;
+        if lst.is_none() {
+            if req {
+                return Err(EvalErr::Exc(self.required_block_error(name)));
+            }
+            return Err(nope(format!("no function registered for block {:?}", name)));
+        }
+        let n: usize = lst.len()?;
+        if req && n <= 1 {
+            return Err(EvalErr::Exc(self.required_block_error(name)));
+        }
+        let item0: Bound<'py, PyAny> = {
+            let mut seq: Vec<Bound<'py, PyAny>> = Vec::new();
+            {
+                let iter = lst.iter()?;
+                for item in iter {
+                    seq.push(item?);
+                }
+            }
+            match seq.first() { Some(x) => x.clone(), None => return Err(nope("empty block list")) }
+        };
+        let rv = item0.call1((self.ctx(),))?;
+        for p in rv.try_iter()? {
+            out.push(p?);
+        }
+        Ok(())
+    }
+
+    fn required_block_error(&self, name: &str) -> PyErr {
+        // python's codegen embeds the f-string repr of the block name.
+        let builtins = self.py.import("builtins").unwrap();
+        let rep_fn = builtins.getattr("repr").unwrap();
+        let nmobj = PyString::new(self.py, name);
+        let rep: String = rep_fn.call1((&nmobj,)).unwrap().extract().unwrap();
+        PyErr::new::<TemplateRuntimeError, _>(format!(
+            "Required block {} not found",
+            rep
+        ))
+    }
+
+    /// Run one template unit as a root region (its generated root function).
+    fn exec_unit(&self, unit: &Rc<UnitInfo>, out: &mut Vec<Bound<'py, PyAny>>) -> ERes<()> {
+        let items = match &unit.tree {
+            Av::Node("Template", _, a) => match a.first() {
+                Some(Av::List(l)) => l,
+                _ => return Err(nope("bad template body")),
+            },
+            _ => return Err(nope("template node expected")),
+        };
+        let mut occs: Vec<Occ> = Vec::new();
+        for it in items {
+            self.walk_fsf(it, &mut occs);
+        }
+        let mut kinds = self.build_kinds(&occs, &[]);
+        // the root frame gets `self` when the name is accessed undeclared
+        // outside blocks (codegen's find_undeclared over node.body).
+        let uses_self = {
+            let mut track = [true];
+            let mut found = [false];
+            for it in items {
+                self.spec1_walk(it, &mut track, &mut found);
+            }
+            found[0]
+        };
+        if uses_self {
+            kinds.insert("self".to_string(), IK::Param);
+        }
+        let re = Rc::new(RootExec { any_extends: unit.any_extends, extended: RefCell::new(false), parent: RefCell::new(None) });
+        self.enter_scope(&kinds)?;
+        if uses_self {
+            let trefcls = self.rt().getattr("TemplateReference")?;
+            let obj = trefcls.call1((self.ctx(),))?;
+            if let Some(frame) = self.stack.borrow().last().cloned() {
+                frame.borrow_mut().slots.insert("self".to_string(), Some(obj.unbind()));
+            }
+        }
+        self.ext_stack.borrow_mut().push(re.clone());
+        // the generator counts every visited node regardless of runtime branch;
+        // only executed branches matter for what is observable, so counting at
+        // execution time reproduces it exactly (see slice notes).
+        let mut res: ERes<()> = Ok(());
+        for it in items {
+            // every direct child is visited at the root frame itself.
+            let mut nf = *self.flags.borrow();
+            nf.chain_top = true;
+            nf.chain_root = true;
+            *self.flags.borrow_mut() = nf;
+            res = self.exec_one(it, out);
+            if res.is_err() {
+                break;
+            }
+        }
+        // the parent root renders after this body finished (codegen appends the
+        // `yield from` at the end of the root function).
+        if res.is_ok() && *re.extended.borrow() {
+            let par = re.parent.borrow().clone();
+            if let Some(pu) = par {
+                self.flags.replace(BlkFlags::default());
+                res = self.exec_unit(&pu, out);
+            }
+        }
+        self.ext_stack.borrow_mut().pop();
+        self.pop_scope();
+        res
+    }
+
+    fn spec1_walk(&self, av: &Av, track: &mut [bool; 1], found: &mut [bool; 1]) {
+        match av {
+            Av::List(inner) | Av::Tuple(inner) => {
+                for a in inner {
+                    self.spec1_walk(a, track, found);
+                }
+            }
+            Av::Node("Block", _, _) => {}
+            Av::Node("Name", _, a) => {
+                if a.len() >= 2 {
+                    let Some(n) = arg_str(&a[0]) else { return };
+                    if n == "self" && track[0] {
+                        if arg_str(&a[1]) == Some("load") {
+                            found[0] = true;
+                        } else {
+                            track[0] = false;
+                        }
+                    }
+                }
+            }
+            Av::Node(_, _, a) => {
+                for x in a {
+                    self.spec1_walk(x, track, found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+
 }
 
 fn body_of(args: &[Av]) -> &[Av] {
     match &args[2] {
         Av::List(b) => b,
         _ => &[],
+    }
+}
+
+
+/// True if any node named `want` appears below `av` (`Node.find`).
+fn has_node_named(av: &Av, want: &str) -> bool {
+    match av {
+        Av::List(inner) | Av::Tuple(inner) => inner.iter().any(|a| has_node_named(a, want)),
+        Av::Node(name, _, a) => {
+            *name == want || a.iter().any(|x| has_node_named(x, want))
+        }
+        _ => false,
+    }
+}
+
+/// Rust callable backing one compiled block function (slice C-v4).  Compiled
+/// block functions are module level and take the live context; they enter a
+/// fresh frame initialized from their own symbol analysis (no ancestor scope),
+/// bind `super` / `self` when accessed undeclared, render into parts and return
+/// them as a list so that python's `concat` in `BlockReference.__call__` joins
+/// the very same pieces.
+#[pyclass(unsendable)]
+pub struct BlockFunc {
+    session: Rc<Session>,
+    name: String,
+    body: Vec<Av>,
+    uses_super: bool,
+    uses_self: bool,
+    id: usize,
+}
+
+impl BlockFunc {
+    /// Render this block function's body against the shared session context.
+    fn render_parts<'py>(&self, py: Python<'py>) -> Result<Vec<Bound<'py, PyAny>>, EvalErr> {
+        let ev = Ev::block_ev(py, self.session.clone());
+        let mut occs: Vec<Occ> = Vec::new();
+        for it in &self.body {
+            ev.walk_fsf(it, &mut occs);
+        }
+        // compiled block frames own an independent symbol table.
+        let mut kinds = ev.build_kinds(&occs, &[]);
+        if self.uses_super || self.uses_self {
+            for n in ["super", "self"] {
+                if (n == "super" && self.uses_super) || (n == "self" && self.uses_self) {
+                    kinds.insert(n.to_string(), IK::Param);
+                }
+            }
+        }
+        ev.enter_scope(&kinds)?;
+        if self.uses_super {
+            let me = self
+                .session
+                .blocks_reg
+                .borrow()
+                .get(&self.id)
+                .cloned()
+                .ok_or_else(|| nope("block function not registered"))?;
+            let sv: Bound<'_, PyAny> = ev.ctx().call_method1(
+                "super",
+                (PyString::new(py, self.name.as_str()), me.bind(py).as_any().clone()),
+            )?;
+            if let Some(frame) = ev.stack.borrow().last().cloned() {
+                frame.borrow_mut().slots.insert("super".to_string(), Some(sv.unbind()));
+            }
+        }
+        if self.uses_self {
+            let trefcls = ev.rt().getattr("TemplateReference")?;
+            let obj = trefcls.call1((ev.ctx(),))?;
+            if let Some(frame) = ev.stack.borrow().last().cloned() {
+                frame.borrow_mut().slots.insert("self".to_string(), Some(obj.unbind()));
+            }
+        }
+        let mut buf: Vec<Bound<'_, PyAny>> = Vec::new();
+        ev.exec_items(&self.body, &mut buf)?;
+        Ok(buf)
+    }
+}
+
+#[pymethods]
+impl BlockFunc {
+    /// Invoked with the live context, either directly from a root region or
+    /// through python's `BlockReference.__call__`; returns the finalized parts.
+    #[pyo3(signature = (_context))]
+    fn __call__<'p>(
+        &self,
+        py: Python<'p>,
+        _context: &Bound<'p, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        match self.render_parts(py) {
+            Ok(parts) => Ok(PyList::new(py, parts)?.into_any().unbind()),
+            Err(EvalErr::Exc(e)) => Err(e),
+            Err(EvalErr::Unsupported(u)) => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                format!("unsupported inside a block body: {u}"),
+            )),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("<BlockFunc {}>", self.name)
     }
 }
 
@@ -2321,7 +2988,19 @@ pub fn evaluate<'py>(
     rt: Bound<'py, PyAny>,
     name: Option<String>,
 ) -> EvalOutcome<'py> {
-    let ev = match Ev::new(py, ctx, rt, name) {
+    evaluate_with_sources(py, av, ctx, rt, name, Default::default())
+}
+
+/// Evaluate a parsed template with extra parent sources for `{% extends %}`.
+pub fn evaluate_with_sources<'py>(
+    py: Python<'py>,
+    av: &Av,
+    ctx: Bound<'py, PyAny>,
+    rt: Bound<'py, PyAny>,
+    name: Option<String>,
+    srcs: std::collections::HashMap<String, Option<Vec<PToken>>>,
+) -> EvalOutcome<'py> {
+    let ev = match Ev::new(py, ctx, rt, name, srcs) {
         Ok(e) => e,
         Err(EvalErr::Exc(e)) => return EvalOutcome::Exc(e),
         Err(EvalErr::Unsupported(u)) => return EvalOutcome::Unsupported(u),
@@ -2331,20 +3010,29 @@ pub fn evaluate<'py>(
         Err(EvalErr::Unsupported(u)) => return EvalOutcome::Unsupported(u),
         Err(EvalErr::Exc(e)) => return EvalOutcome::Exc(e),
     }
-    let mut out: Vec<Bound<'py, PyAny>> = Vec::new();
-    match av {
-        Av::Node("Template", _, a) => {
-            let res = ev.exec_template(a, &mut out);
-            match res {
-                Ok(()) => match ev.out_join(out) {
-                    Ok(v) => EvalOutcome::Rendered(v),
-                    Err(EvalErr::Exc(e)) => EvalOutcome::Exc(e),
-                    Err(EvalErr::Unsupported(u)) => EvalOutcome::Unsupported(u),
-                },
-                Err(EvalErr::Exc(e)) => EvalOutcome::Exc(e),
-                Err(EvalErr::Unsupported(u)) => EvalOutcome::Unsupported(u),
-            }
+    if let Err(e) = ev.check_layout(av, true) {
+        match e {
+            EvalErr::Unsupported(u) => return EvalOutcome::Unsupported(u),
+            EvalErr::Exc(x) => return EvalOutcome::Exc(x),
         }
-        _ => EvalOutcome::Unsupported("not a template".to_string()),
+    }
+    // prepare and register the top template's own blocks before anything runs.
+    let unit = match ev.prepare_unit(av) {
+        Ok(u) => u,
+        Err(EvalErr::Unsupported(u)) => return EvalOutcome::Unsupported(u),
+        Err(EvalErr::Exc(x)) => return EvalOutcome::Exc(x),
+    };
+    if let Err(x) = ev.register_blocks(&unit, false) {
+        return EvalOutcome::Exc(x);
+    }
+    let mut out: Vec<Bound<'py, PyAny>> = Vec::new();
+    match ev.exec_unit(&unit, &mut out) {
+        Ok(()) => match ev.out_join(out) {
+            Ok(v) => EvalOutcome::Rendered(v),
+            Err(EvalErr::Exc(e)) => EvalOutcome::Exc(e),
+            Err(EvalErr::Unsupported(u)) => EvalOutcome::Unsupported(u),
+        },
+        Err(EvalErr::Exc(e)) => EvalOutcome::Exc(e),
+        Err(EvalErr::Unsupported(u)) => EvalOutcome::Unsupported(u),
     }
 }

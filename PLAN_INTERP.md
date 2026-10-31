@@ -86,7 +86,9 @@ The compiler port has two candidate strategies:
       and matches.  Validated: 33 differential cases plus 8 codegen-syntax
       fallback cases and 4 semantics locks, and 33k structured macro
       templates over eleven seeds, zero mismatches.
-* [ ] C-v4: block inheritance + super(); `loop` in nested templates; error
+* [~] C-v4a (partial): plain block inheritance + super()/self implemented and
+      validated differentially; scoped blocks, parent-side error parity and the
+      `loop` / error-propagation items still open. Error
       propagation parity (`TemplateRuntimeError`, tracebacks via debug.py --
       likely keep python-side wrapping).
 * [ ] performance pass: measure against python-compiled baseline; only keep

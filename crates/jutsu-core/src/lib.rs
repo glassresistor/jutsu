@@ -150,7 +150,7 @@ fn err_tuple<'py>(
 /// directly so they propagate untouched (matching how the compiled engine
 /// re-raises them through `Environment.handle_exception`).
 #[pyfunction]
-#[pyo3(signature = (tokens, lexerr = None, ctx = None, rt = None, name = None))]
+#[pyo3(signature = (tokens, lexerr = None, ctx = None, rt = None, name = None, sources = None))]
 fn eval_template<'py>(
     py: Python<'py>,
     tokens: Vec<(u32, String, Py<PyAny>)>,
@@ -158,11 +158,27 @@ fn eval_template<'py>(
     ctx: Option<Py<PyAny>>,
     rt: Option<Py<PyAny>>,
     name: Option<String>,
+    sources: Option<std::collections::HashMap<String, Option<Vec<(u32, String, Py<PyAny>)>>>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let ptoks = to_ptokens(py, &tokens);
     let mut rp = RtParser::new(ptoks, lexerr.map(Arc::new));
     match rp.parse() {
         Ok(av) => {
+            let srcs: std::collections::HashMap<String, Option<Vec<PToken>>> = match sources {
+                Some(map) => map
+                    .into_iter()
+                    .map(|(k, v)| {
+                        (
+                            k,
+                            match v {
+                                Some(toks) => Some(to_ptokens(py, &toks)),
+                                None => None,
+                            },
+                        )
+                    })
+                    .collect(),
+                None => Default::default(),
+            };
             let (cbox, rtbox) = match (ctx, rt) {
                 (Some(c), Some(r)) => (c.bind(py).clone(), r.bind(py).clone()),
                 _ => {
@@ -171,7 +187,7 @@ fn eval_template<'py>(
                     ))
                 }
             };
-            match eval::evaluate(py, &av, cbox, rtbox, name) {
+            match eval::evaluate_with_sources(py, &av, cbox, rtbox, name, srcs) {
                 eval::EvalOutcome::Rendered(v) => {
                     let items: Vec<Bound<'py, PyAny>> = vec![
                         "__okrender__".into_bound_py_any(py)?,
