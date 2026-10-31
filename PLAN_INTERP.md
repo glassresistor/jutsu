@@ -83,8 +83,9 @@ The compiler port has two candidate strategies:
       macro parameters, explicit `caller=` in a call-block target) are
       reported unsupported rather than reproduced; the generator's
       dict-literal workaround path (python-keyword keys) renders normally
-      and matches.  Validated: 41 fixed cases + 27k structured macro
-      templates over eight seeds, zero mismatches.
+      and matches.  Validated: 33 differential cases plus 8 codegen-syntax
+      fallback cases and 4 semantics locks, and 33k structured macro
+      templates over eleven seeds, zero mismatches.
 * [ ] C-v4: block inheritance + super(); `loop` in nested templates; error
       propagation parity (`TemplateRuntimeError`, tracebacks via debug.py --
       likely keep python-side wrapping).

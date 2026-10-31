@@ -197,13 +197,20 @@ keyword key is itself a python keyword the generator takes its dict-literal
 workaround instead, where duplicates simply lose to the later entry -- which
 is what the interpreter does, so those render normally.
 
-Validated by 41 fixed macro/call-block cases (closure lifetime across
+Async-enabled environments (`Environment(enable_async=True)`) fall back
+unconditionally as well -- found while validating this slice: even the
+synchronous `render` path of an async environment awaits coroutines and
+consumes async iterables, which needs the python async runtime modelled
+before it can be served (`test_async_falls_back`).
+
+Validated by 33 differential macro/call-block cases (closure lifetime across
 `for`/`with`/filter scopes, recursion and mutual recursion, nested macros,
-the caller specials, error parity) plus a macro-focused structured corpus of
-27k generated templates over eight seeds comparing rendered text *and*
-exception type/message (`scripts/macro_fuzz.py`): zero mismatches; the only
-fallback reasons in the whole corpus are the two codegen `SyntaxError` cases
-above.
+the caller specials, error parity) plus 8 codegen-syntax fallback cases and
+4 semantics locks (`tests/test_rust_eval.py`), and a macro-focused structured
+corpus of 33k generated templates over eleven seeds comparing rendered text
+*and* exception type/message (`scripts/macro_fuzz.py`): zero mismatches; the
+only fallback reasons in the whole corpus are the two codegen `SyntaxError`
+cases above.
 
 Branch-aware symbol merging (gap found by fuzz seed 2, now closed): the
 occurrence walk collects structured occurrences per `if` statement (the test,

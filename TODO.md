@@ -56,6 +56,11 @@ criterion.
       Undefined (subclasses: ChainableUndefined/FastUndefined), missing sentinel,
       output buffering (`concat`, markup_join, str_join)
 * [ ] autoescape semantics + `Markup` integration via markupsafe objects
+* [ ] async environments (`enable_async`) fall back unconditionally (found
+      while validating C-v3b): even the synchronous `render` path awaits
+      coroutines and consumes async iterables, so serving them needs the
+      python async runtime modelled first; guard in `Session::build`,
+      regression test `test_async_falls_back`.
 * [X] slice C-v2 (statements) implemented in `eval.rs`: if/elif/else, for
       (lazy test-filtered loops, else branches, extended loops via a live
       `LoopContext`, recursive loops that render the next level in rust through
@@ -121,10 +126,11 @@ criterion.
       cannot be reproduced; when a key is a python keyword the generator's
       dict-literal workaround applies instead and duplicates simply lose to
       the later entry (the interpreter matches that path directly).
-      Validated: 41 fixed macro cases (`tests/test_rust_eval.py`) covering
+      Validated: 33 differential macro cases plus 8 codegen-syntax fallback
+      cases and 4 semantics locks (`tests/test_rust_eval.py`) covering
       closure lifetime across for/with/filter scopes, recursion, mutual
       recursion, nested macros, caller/kwargs/varargs and error parity; plus
-      a macro-focused structured corpus of 27k templates over eight seeds
+      a macro-focused structured corpus of 33k templates over eleven seeds
       (`scripts/macro_fuzz.py`, fallback census in `scripts/macro_fb.py`):
       zero mismatches, and the only fallback reasons in the whole corpus are
       the two codegen SyntaxError classes above.

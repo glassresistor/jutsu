@@ -532,6 +532,31 @@ def test_autoescape_falls_back():
         assert rust_eval.evaluate(env, src, variables={"x": "<y>"}) is None, src
 
 
+def test_async_falls_back():
+    """An async-enabled environment awaits coroutines and consumes async
+    iterables even in the synchronous `render` path; the interpreter does not
+    model that, so every async environment must fall back -- including plain
+    templates where a synchronous filter happens to work either way.
+    """
+    async def agen():
+        for i in [1, 2]:
+            yield i
+
+    async def af(v):
+        return v.upper()
+
+    env = Environment(enable_async=True)
+    env.filters["af"] = af
+    cases = [
+        ("{{ 'a'|upper }}", {}),
+        ("{{ 'a'|af }}", {}),
+        ("{% for i in g %}{{ i }}{% endfor %}", {"g": agen()}),
+        ("{% macro m() %}{{ 'z'|af }}{% endmacro %}{{ m() }}", {}),
+    ]
+    for src, vars_ in cases:
+        assert rust_eval.evaluate(env, src, variables=vars_) is None, src
+
+
 class Obj:
     def __init__(self):
         self.bar = 7

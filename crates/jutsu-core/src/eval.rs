@@ -348,6 +348,12 @@ impl Session {
             // semantics is the dedicated autoescape slice (see TODO.md).
             return Err(nope("autoescape environment"));
         }
+        // an async-enabled environment awaits coroutines and consumes async
+        // iterables even in the synchronous `render` path; driving that from
+        // rust means porting the whole async runtime, so fall back.
+        if env.getattr("is_async")?.extract::<bool>()? {
+            return Err(nope("async environment"));
+        }
         let filters = match env.getattr("filters")?.downcast_into::<PyDict>() {
             Ok(d) => d,
             Err(_) => return Err(nope("environment.filters is not a dict")),
