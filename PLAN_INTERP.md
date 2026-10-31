@@ -72,9 +72,19 @@ The compiler port has two candidate strategies:
       `analyze_node`: set-blocks analyze the target first, filter blocks the
       filter expression first, for loops analyze target+body before the test
       expression registers loads.
-* [ ] C-v3b: macros and call blocks/caller closures (Macro wrapper object,
-      varargs/kwargs, derived contexts); needs callable rust closures or a
-      python-side helper class wrapping rust state.
+* [x] C-v3b: macros and call blocks implemented -- `runtime.Macro` wrapping a
+      rust callable (`MacroFunc`), defining frame chain kept by `Rc` so
+      closure cells stay alive and writable after the defining statement
+      ended, define-time analysis mirroring `macro_body` + both
+      `analyze_node` passes, implicit/explicit caller-kwargs-varargs,
+      defaults evaluated in the macro frame, call blocks forwarding
+      `caller=`.  Python codegen artifacts that only fail because the
+      generated source is compiled (duplicate keyword arguments, duplicate
+      macro parameters, explicit `caller=` in a call-block target) are
+      reported unsupported rather than reproduced; the generator's
+      dict-literal workaround path (python-keyword keys) renders normally
+      and matches.  Validated: 41 fixed cases + 27k structured macro
+      templates over eight seeds, zero mismatches.
 * [ ] C-v4: block inheritance + super(); `loop` in nested templates; error
       propagation parity (`TemplateRuntimeError`, tracebacks via debug.py --
       likely keep python-side wrapping).

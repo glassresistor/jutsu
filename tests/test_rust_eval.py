@@ -69,12 +69,31 @@ UNSUPPORTED = [
     "{{ f(*args) }}",
     "{{ f(**kw) }}",
     "{{ f(a, *b, **c) }}",
-    "{% macro m(a) %}x{% endmacro %}",
     "{% block b %}B{% endblock %}",
     "{% extends 'x' %}",
     "{% include 'x' %}",
-    "{% call m() %}x{% endcall %}",
 ]
+
+
+def test_macro_call_block_supported():
+    """Macros and call blocks landed in the evaluator with slice C-v3b."""
+    env = Environment()
+    src = "{% macro m(a) %}[{{ a }}]{% endmacro %}{{ m(1) }}"
+    assert rust_eval.evaluate(env, src) == "[1]"
+
+    # calling an undefined target inside a call block raises the same error
+    env2 = Environment()
+    exc_src = "{% call m() %}x{% endcall %}"
+    try:
+        py_exc = ("exc", None)
+        env2.from_string(exc_src).render()
+    except Exception as e:  # noqa: BLE001
+        py_exc = ("exc", type(e).__name__, str(e))
+    try:
+        rust_eval.evaluate(env2, exc_src)
+        raise AssertionError("expected an exception")
+    except Exception as e2:  # noqa: BLE001
+        assert ("exc", type(e2).__name__, str(e2)) == py_exc
 
 
 def test_unsupported():
@@ -421,8 +440,7 @@ def test_loop_target_store_in_macro_ok():
     env = Environment()
     # a macro parameter named `loop` is fine (only for-targets are checked)
     src = "{% macro m(loop) %}x{% endmacro %}y"
-    assert rust_eval.evaluate(env, src) is None
-    assert env.from_string(src).render() == "y"
+    assert rust_eval.evaluate(env, src) == env.from_string(src).render() == "y"
 
 
 def test_structured_statements(n=4000, seed=201):
@@ -590,3 +608,154 @@ def test_branch_merge_full_fuzz_case():
     r = _rust_pair(env, src, vars_)
     assert r[0] != "fallback", f"unsupported: {src!r}"
     assert r == p, f"{src!r}: {r} != {p}"
+
+
+# ---------------------------------------------------------------------------
+# slice C-v3b: macros, call blocks and caller closures
+
+
+class MacroObj:
+    def __init__(self):
+        self.bar = 7
+
+    def __call__(self, x=1):
+        return f"called:{x}"
+
+
+def _kw(*args, **kw):
+    return "pos:" + repr(list(args)) + "|kw:" + repr(sorted(kw.items()))
+
+
+def _invoke_caller(*args, **kw):
+    c = kw.get("caller")
+    if c is not None:
+        return "invoked:" + str(c())
+    return "plain"
+
+
+def macro_vars():
+    return {"x": 0, "xs": [1, 2], "o": MacroObj(), "f": _kw, "tf": _invoke_caller}
+
+
+# macros / call blocks: closures over the defining frame chain, recursion,
+# the caller/kwargs/varargs specials and every error path along the way.
+MACRO_SRC = [
+    # closure over root locals that are assigned after the definition
+    "{% macro m() %}<{{ x }}>{% endmacro %}{% set x = 1 %}{{ m() }}",
+    "{% macro m() %}<{{ x }}>{% endmacro %}{{ x }}{% set x = 2 %}{{ m() }}{{ m() }}",
+    # recursion, mutual recursion and nesting
+    "{% macro r(i) %}{% if i > 0 %}{{ i }}{{ r(i - 1) }}{% endif %}{% endmacro %}"
+    "{{ r(3) }}",
+    "{% macro even(i) %}{% if i == 0 %}yes{% elif i < 0 %}no{% else %}"
+    "{{ odd(i - 1) }}{% endif %}{% endmacro %}{% macro odd(i) %}"
+    "{{ even(i - 1) }}{% endmacro %}{{ even(4) }}",
+    "{% macro outer(x) %}{% macro inner(y) %}({{ x }}{{ y }}){% endmacro %}"
+    "{{ inner(1) }}{% endmacro %}{{ outer(5) }}",
+    # defining scope gone by the time the captured macro runs
+    "{% macro outer() %}{% macro inner() %}[{{ x }}]{% endmacro %}"
+    "{% set g = inner %}{% endmacro %}{{ outer() }}|({{ g() }})",
+    # macros inside for / with / filter scopes
+    "{% for i in xs %}{% macro m() %}i={{ i }} {% endmacro %}{{ m() }}"
+    "{% endfor %}",
+    "{% for i in xs %}{% macro m2() %}<{{ loop.index }}>{% endmacro %}"
+    "{{ m2() }}{% endfor %}",
+    "{% macro m() %}<{{ loop.index }}>{% endmacro %}{% for i in xs %}"
+    "{{ m() }}{% endfor %}",
+    "{% with q = 1 %}{% macro m() %}[{{ q }}{{ x }}]{% endmacro %}{{ m() }}"
+    "{% endwith %}",
+    "{% filter upper %}{% macro m() %}hi{% endmacro %}a{{ m() }}{% endfilter %}",
+    # caller / kwargs / varargs specials
+    "{% macro m() %}A{{ caller() }}B{% endmacro %}{% call m() %}CB{% endcall %}",
+    "{% macro m(x, caller=None) %}[{{ caller() }}]{% endmacro %}"
+    "{% call m() %}CB{% endcall %}",
+    "{% macro m(a) %}|{{ varargs }}|{{ kwargs.items()|list }}|{% endmacro %}"
+    "{{ m(1, 2, 3, k=4) }}",
+    "{% macro m(varargs) %}<{{ varargs }}>{% endmacro %}{{ m('v') }}",
+    # defaults evaluated inside the macro frame / missing parameter undefined
+    "{% set z = 9 %}{% macro m(a=z) %}[{{ a }}]{% endmacro %}{{ m() }}",
+    "{% macro m(a=z) %}[{{ a }}]{% endmacro %}{% set z = 3 %}{{ m() }}",
+    "{% macro m(a) %}({{ a }}){% endmacro %}{{ m() }}",
+    # the Macro object itself
+    "{% macro m(a, b=2) %}x{% endmacro %}{{ m.name }}|{{ m.arguments }}|{{ m }}",
+    "{% macro _priv() %}x{% endmacro %}{% set p = _priv() %}{{ p }}",
+    # call blocks with their own signature
+    "{% call (a) f(a) %}body:{{ a }}{% endcall %}",
+    "{% call (a, b=3) f(a, 1) %}{{ a }}{{ b }}{% endcall %}",
+    "{% call (a, b) f(a, 1) %}{{ caller(5, b=6) }}{% endcall %}",
+    "{% call tf() %}cb-body{% endcall %}",
+    "{% call f(k=1) %}body{% endcall %}",
+    # two values for the special caller argument (python's own guard)
+    "{% macro m() %}m{% endmacro %}{% call m() %}{% call m() %}x{% endcall %}"
+    "{% endcall %}",
+    # name resolution / shadowing
+    "{% macro m(a) %}{{ a }}{% endmacro %}{% set m = 5 %}{{ m(1) }}",
+    "{% set n = 5 %}{% call n() %}x{% endcall %}",
+    # store into a root cell from inside a macro
+    "{% macro m(v) %}{% set x = v %}{{ x }}{% endmacro %}{{ m(7) }}|{{ x }}",
+    # argument errors of the python-side Macro wrapper
+    "{% macro m(a) %}x{% endmacro %}{{ m(1, 2) }}",
+    "{% macro m(a) %}x{% endmacro %}{{ m(k=9) }}",
+    # dict-literal workaround path: duplicates are legal and last wins
+    "{{ f(class=1, a=1, a=2) }}",
+    "{% call f(caller='c', class=1) %}cb{% endcall %}",
+]
+
+
+def test_macro_cases():
+    for src in MACRO_SRC:
+        vars_ = macro_vars()
+        env = Environment()
+        p = _py(env, src, vars_)
+        env2 = Environment()
+        r = _rust(env2, src, vars_)
+        assert r[0] != "fallback", f"unsupported: {src!r}"
+        assert r == p, f"{src!r}: {r} != {p}"
+
+
+# python's code generator emits these into generated source, where CPython
+# fails with a SyntaxError carrying generated line numbers; the interpreter
+# cannot reproduce that message, so it must report unsupported instead.
+CODEGEN_SYNTAX = [
+    "{{ f(a=1, a=2) }}",                                   # duplicate keyword
+    "{% if false %}{{ f(a=1, a=2) }}{% endif %}",          # ... even when dead
+    "{{ x | upper(b=1, b=2) }}",                           # filters too
+    "{% if x is undefined(a=1, a=2) %}y{% endif %}",       # and tests
+    "{% macro m() %}{{ f(a=1, a=2) }}{% endmacro %}",
+    "{% call f(b=1, b=2) %}x{% endcall %}",
+    "{% call f(caller='c') %}cb{% endcall %}",             # forwarded caller
+    "{% macro m(a, a) %}x{% endmacro %}",                  # duplicate parameter
+]
+
+
+def test_codegen_syntax_falls_back():
+    for src in CODEGEN_SYNTAX:
+        vars_ = macro_vars()
+        env = Environment()
+        p = _py(env, src, vars_)
+        assert p[0] == "exc" and p[1] == "SyntaxError", f"{src!r}: {p}"
+        env2 = Environment()
+        assert rust_eval.evaluate(env2, src, variables=vars_) is None, src
+
+
+def test_macro_expected_semantics():
+    """Lock the closure/caller semantics that make macros tricky."""
+    cases = [
+        # a macro sees the current value of root locals, not the define-time one
+        ("{% macro m() %}<{{ x }}>{% endmacro %}{% set x = 1 %}{{ m() }}<{{ x }}>",
+         "<1><1>"),
+        # implicit caller keeps the call block body's output
+        ("{% macro m() %}[{{ caller() }}]{% endmacro %}"
+         "{% call m() %}cb{% endcall %}", "[cb]"),
+        # implicit varargs/kwargs shapes
+        ("{% macro m() %}{{ varargs }}|{{ kwargs.pop('k') }}|{{ kwargs }}{% endmacro %}"
+         "{{ m(1, k=2) }}", "(1,)|2|{}"),
+        # recursion through the macro name
+        ("{% macro r(i) %}{% if i %}{{ i }}{{ r(i - 1) }}{% endif %}{% endmacro %}"
+         "{{ r(4) }}", "4321"),
+    ]
+    env = Environment()
+    for src, want in cases:
+        got = rust_eval.evaluate(Environment(), src, variables=macro_vars())
+        assert got is not None, src
+        assert got == want, f"{src!r}: {got!r} != {want!r}"
+        assert env.from_string(src).render(**macro_vars()) == want

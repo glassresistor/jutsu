@@ -24,8 +24,8 @@ the existing Jinja2 extensions and ecosystem.
 | Rust lexer (`crates/jutsu-core/src/lexer.rs`) | **done and wired into `Lexer.tokeniter`** |
 | Rust parser (`crates/jutsu-core/src/parser.rs`) | **done and wired into `Parser.parse`** (default on; `JUTSU_RUST_PARSER=0` switches back) |
 | Packaging (maturin wheel with rust core) | done (`maturin build -r -m crates/jutsu-core/Cargo.toml`) |
-| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | **slice C-v2/C-v3a: statements + scoping evaluate fully in rust** -- if/elif/else, for (incl. `if=` test filters, else branches, recursive loops with `loop()` recursion, full LoopContext features), set/set-block(+filter), filter blocks, with, namespace refs; compiled-engine scope semantics reproduced (slot frames, alias-copy on store, per-scope resolve loads, root writeback+exported_vars). Not wired into `Template.render` yet; validated differentially incl. exception type/message parity |
-| Code generator / runtime | still python (next targets: macros/call-blocks, block inheritance, includes) |
+| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | **slice C-v2/C-v3a/C-v3b: statements, scoping and macros/call blocks evaluate fully in rust** -- if/elif/else, for (incl. `if=` test filters, else branches, recursive loops with `loop()` recursion, full LoopContext features), set/set-block(+filter), filter blocks, with, namespace refs, `{% macro %}` / `{% call %}` with caller/kwargs/varargs closures; compiled-engine scope semantics reproduced (slot frames, alias-copy on store, per-scope resolve loads, root writeback+exported_vars). Not wired into `Template.render` yet; validated differentially incl. exception type/message parity |
+| Code generator / runtime | still python (next targets: block inheritance, includes/imports) |
 
 The lexer port is validated three ways:
 
@@ -160,6 +160,50 @@ the normal output finalize.  The symbol-occurrence order follows
 blocks; loop frames analyze target+body before the test expression registers
 its loads -- matching when a later occurrence must not override an earlier
 decision.
+
+## Evaluator port notes (slice C-v3b)
+
+Macros and call blocks are the first part of the evaluator that must outlive
+the statement that defined them, so the evaluator shares its `Session` through
+an `Rc` and every macro closure keeps the *defining frame chain* as
+`Vec<Rc<RefCell<Scope>>>`: popped frames stay alive (and writable) through
+those `Rc`s exactly like the compiled engine's python closures over root
+locals, so a macro invoked later sees the current value of a captured
+variable -- including variables assigned after the definition.
+
+A `{% macro %}` creates a real `runtime.Macro` python object whose `func` is a
+rust callable (`MacroFunc` pyclass), so argument matching, arity errors,
+`macro 'm' takes not more than N argument(s)`, the two-values-for-caller
+guard and the `<Macro name>` repr all run through python's own `Macro.__call__`
+-- byte-identical semantics by construction.  Invoking enters a fresh scope
+frame initialized from the define-time symbol analysis (`macro_body` plus the
+occurrence order parameters, defaults, body), binds parameters (a missing one
+either evaluates its default expression inside the macro frame or builds
+`environment.undefined("parameter 'x' was not provided", name=...)`), renders
+the buffered body and returns it joined through `Environment.concat`.
+Implicit `caller`/`kwargs`/`varargs` follow the code generator: undeclared
+loads of the specials mark `accesses_*`, an explicit parameter drops the
+name from tracking, and only the *last* `caller` parameter is remembered for
+the "must be omitted or be given a default" assertion.
+
+One systematic divergence is handled by falling back instead of trying to
+reproduce it: python's code generator writes keyword arguments into generated
+source, so a duplicated key (`{{ f(a=1, a=2) }}`, `{{ x|filter(b=1, b=2) }}`,
+a call block whose target already spells `caller=`) or a duplicated macro
+parameter makes CPython fail with a `SyntaxError` whose message embeds
+generated line numbers (`keyword argument repeated: a (<template>, line 12)`)
+that no interpreter can echo.  The scan reports those unsupported; when any
+keyword key is itself a python keyword the generator takes its dict-literal
+workaround instead, where duplicates simply lose to the later entry -- which
+is what the interpreter does, so those render normally.
+
+Validated by 41 fixed macro/call-block cases (closure lifetime across
+`for`/`with`/filter scopes, recursion and mutual recursion, nested macros,
+the caller specials, error parity) plus a macro-focused structured corpus of
+27k generated templates over eight seeds comparing rendered text *and*
+exception type/message (`scripts/macro_fuzz.py`): zero mismatches; the only
+fallback reasons in the whole corpus are the two codegen `SyntaxError` cases
+above.
 
 Branch-aware symbol merging (gap found by fuzz seed 2, now closed): the
 occurrence walk collects structured occurrences per `if` statement (the test,

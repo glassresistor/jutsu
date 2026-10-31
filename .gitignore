@@ -3,3 +3,4 @@ __pycache__/
 target/
 .pytest_cache/
 dist/
+scripts/*mismatch*.txt

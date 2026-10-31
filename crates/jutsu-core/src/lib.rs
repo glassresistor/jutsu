@@ -290,5 +290,6 @@ fn _jutsu(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tokenize, m)?)?;
     m.add_function(wrap_pyfunction!(parse, m)?)?;
     m.add_function(wrap_pyfunction!(eval_template, m)?)?;
+    m.add_class::<eval::MacroFunc>()?;
     Ok(())
 }

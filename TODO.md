@@ -98,9 +98,36 @@ criterion.
       `_filter_test_common`, result finalized with `str`); occurrence order
       fixed to match `analyze_node` for filter/set blocks and for loops.
       Namespace objects already covered in C-v2.
-* [ ] macro + call-block semantics (`caller()` closures, varargs/kwargs,
-      Macro wrapper object) -- needs callable rust closures or a python-side
-      helper class; deferred to the next slice.
+* [X] slice C-v3b: macros and call blocks implemented in `eval.rs`.  The
+      evaluator's `Session` is shared through an `Rc` and each macro closure
+      keeps its defining frame chain (`Vec<Rc<RefCell<Scope>>>`) so popped
+      frames stay alive and writable -- a macro sees the current value of a
+      captured name, including names assigned after the definition.  A
+      `runtime.Macro` python object wraps a rust callable (`MacroFunc`
+      pyclass), so argument matching, arity/keyword errors, the two-values
+      for caller guard and the `<Macro name>` repr are python's own.
+      Define-time analysis mirrors `macro_body` + both `analyze_node` passes
+      (occurrence order parameters, defaults, body; implicit specials force
+      PARAM kinds; only the LAST explicit `caller` parameter is remembered
+      for the "must be omitted or be given a default" assertion).  Defaults
+      evaluate inside the macro frame; a missing parameter without a default
+      becomes `environment.undefined("parameter 'x' was not provided", ...)`.
+      Call blocks inject `caller=` into the forwarded keywords exactly like
+      `forward_caller=True`.
+      Divergence handled by falling back: python's code generator writes
+      keyword arguments into generated source, so duplicated keys in any
+      Call/Filter/Test (`{{ f(a=1, a=2) }}`) or duplicated macro parameters
+      make CPython raise `SyntaxError` with generated line numbers that
+      cannot be reproduced; when a key is a python keyword the generator's
+      dict-literal workaround applies instead and duplicates simply lose to
+      the later entry (the interpreter matches that path directly).
+      Validated: 41 fixed macro cases (`tests/test_rust_eval.py`) covering
+      closure lifetime across for/with/filter scopes, recursion, mutual
+      recursion, nested macros, caller/kwargs/varargs and error parity; plus
+      a macro-focused structured corpus of 27k templates over eight seeds
+      (`scripts/macro_fuzz.py`, fallback census in `scripts/macro_fb.py`):
+      zero mismatches, and the only fallback reasons in the whole corpus are
+      the two codegen SyntaxError classes above.
 * [ ] `with`/autoescape scope modifiers via ScopedEvalContextModifier
 * [ ] performance pass: avoid pyo3 round-trips for hot attribute lookups where
       safe; measure against python-compiled baseline and only keep wins.

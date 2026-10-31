@@ -136,7 +136,7 @@ pub const SUPPORTED_NODES: &[&str] = &[
     "Pair", "CondExpr", "Or", "And", "Not", "Compare", "Operand", "Concat", "Call",
     "Filter", "Test", "Add", "Sub", "Mul", "Div", "FloorDiv", "Mod", "Pow", "Pos",
     "Neg", "Slice", "Keyword", "Output", "If", "Assign", "AssignBlock", "FilterBlock",
-    "For", "With", "NSRef", "Template",
+    "For", "With", "NSRef", "Template", "Macro", "CallBlock",
 ];
 
 /// Occurrence kinds collected by the scope symbol walk.
@@ -163,6 +163,168 @@ enum Occ {
 struct Sym {
     refs: HashMap<String, IK>,
     stores: std::collections::HashSet<String>,
+}
+
+/// Compile-time-equivalent analysis of a macro / call block body, done once
+/// at define-execution time (the compiled engine does it during codegen).
+#[derive(Clone)]
+struct MacroPlan {
+    kinds: HashMap<String, IK>,
+    params: Vec<(String, Option<Av>)>,
+    accesses_caller: bool,
+    caller_implicit: bool,
+    accesses_kwargs: bool,
+    accesses_varargs: bool,
+}
+
+/// Rust callable backing a `runtime.Macro` object (slice C-v3b).  Holds the
+/// defining frame chain by `Rc` so closure cells stay alive and writable
+/// after the render step that defined them ended, plus everything needed to
+/// enter the macro's own scope frame on every invocation.
+#[pyclass(unsendable)]
+pub struct MacroFunc {
+    session: Rc<Session>,
+    chain: Vec<Rc<RefCell<Scope>>>,
+    kinds: HashMap<String, IK>,
+    params: Vec<(String, Option<Av>)>,
+    caller_slot: bool,
+    kwargs_slot: bool,
+    varargs_slot: bool,
+    body: Vec<Av>,
+}
+
+#[pymethods]
+impl MacroFunc {
+    /// Called from `runtime.Macro._invoke` with the argument list built by
+    /// python's own `Macro.__call__`: positional fills for every declared
+    /// parameter (`missing` where not provided), then the appended implicit
+    /// specials in codegen order -- caller, kwargs dict, varargs tuple.  The
+    /// layout is guaranteed to match the flags captured at define time.
+    #[pyo3(signature = (* args))]
+    fn __call__(&self, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        let py = args.py();
+        let mut values: Vec<Py<PyAny>> = Vec::with_capacity(args.len());
+        for a in args.iter() {
+            values.push(a.unbind());
+        }
+        into_pyres(self.invoke(py, &values))
+    }
+}
+
+impl MacroFunc {
+    fn invoke(&self, py: Python<'_>, values: &[Py<PyAny>]) -> Result<Py<PyAny>, EvalErr> {
+        let ev = Ev::with_chain(py, self.session.clone(), self.chain.clone());
+        ev.enter_scope(&self.kinds)?;
+        let miss = ev.missing();
+        for (i, (pname, def)) in self.params.iter().enumerate() {
+            // a `missing` slot value means "parameter was not provided"
+            let provided: Option<Bound<'_, PyAny>> = match values.get(i) {
+                Some(v) => {
+                    let b = v.bind(py).clone();
+                    if b.is(&miss) {
+                        None
+                    } else {
+                        Some(b)
+                    }
+                }
+                None => None,
+            };
+            let to_store: Bound<'_, PyAny> = match provided {
+                Some(v) => v,
+                None => match def {
+                    Some(dav) => ev.node(dav)?,
+                    None => {
+                        // python's `!r` of an identifier is always single-quoted
+                        let hint = format!("parameter '{pname}' was not provided");
+                        let kw = PyDict::new(py);
+                        kw.set_item("name", pname.as_str())?;
+                        ev.undef().call((&hint,), Some(&kw))?
+                    }
+                },
+            };
+            ev.set_top_slot(pname, &to_store)?;
+        }
+        let mut pos = self.params.len();
+        for (slot_name, wanted) in [
+            ("caller", self.caller_slot),
+            ("kwargs", self.kwargs_slot),
+            ("varargs", self.varargs_slot),
+        ] {
+            if wanted {
+                match values.get(pos) {
+                    Some(v) => ev.set_top_slot_raw(slot_name, v.clone())?,
+                    None => return Err(nope(format!("missing {slot_name} argument"))),
+                }
+                pos += 1;
+            }
+        }
+        let mut buf: Vec<Bound<'_, PyAny>> = Vec::new();
+        ev.exec_items(&self.body, &mut buf)?;
+        let lst = PyList::new(py, &buf)?;
+        let joined = ev.env().call_method1("concat", (&lst,))?;
+        ev.pop_scope();
+        Ok(joined.unbind())
+    }
+}
+
+impl<'py> Ev<'py> {
+    fn set_top_slot_raw(&self, name: &str, v: Py<PyAny>) -> ERes<()> {
+        let top = self.stack.borrow().last().cloned();
+        match top {
+            Some(frame) => {
+                frame
+                    .borrow_mut()
+                    .slots
+                    .insert(name.to_string(), Some(v));
+                Ok(())
+            }
+            None => Err(nope("no scope frame to bind")),
+        }
+    }
+}
+
+/// `keyword.kwlist` of the target python runtime; mirrors the
+/// `is_python_keyword` check that decides the code generator's dict-literal
+/// workaround for keyword arguments.
+const PY_KEYWORDS: &[&str] = &[
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break",
+    "class", "continue", "def", "del", "elif", "else", "except", "finally",
+    "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal",
+    "not", "or", "pass", "raise", "return", "try", "while", "with", "yield",
+];
+
+fn is_python_keyword(name: Option<&str>) -> bool {
+    match name {
+        Some(n) => PY_KEYWORDS.iter().any(|k| *k == n),
+        None => false,
+    }
+}
+
+/// The key of a `Keyword` node (field layout: [key, value]).
+fn kw_key(av: &Av) -> Option<&str> {
+    match av {
+        Av::Node("Keyword", _, a) if !a.is_empty() => arg_str(&a[0]),
+        _ => None,
+    }
+}
+
+/// Name of a signature parameter node (`parse_signature` only allows simple
+/// name targets).  Field layout: [name, ctx].
+fn param_name(av: &Av) -> Option<&str> {
+    match av {
+        Av::Node("Name", _, a) if !a.is_empty() => arg_str(&a[0]),
+        _ => None,
+    }
+}
+
+fn into_pyres<T>(r: Result<T, EvalErr>) -> PyResult<T> {
+    match r {
+        Ok(v) => Ok(v),
+        Err(EvalErr::Exc(e)) => Err(e),
+        Err(EvalErr::Unsupported(u)) => Err(pyo3::exceptions::PyRuntimeError::new_err(
+            format!("unsupported inside a macro body: {u}"),
+        )),
+    }
 }
 
 impl Session {
@@ -1137,6 +1299,8 @@ other => Err(nope(other.to_string())),
             "FilterBlock" => self.exec_filter_block(args, out),
             "For" => self.exec_for(args, out),
             "With" => self.exec_with(args, out),
+            "Macro" => self.exec_macro(args),
+            "CallBlock" => self.exec_call_block(args, out),
             _ => Err(nope(format!("{name} statement outside the subset"))),
         }
     }
@@ -1629,7 +1793,7 @@ other => Err(nope(other.to_string())),
                     self.scan(a)?;
                 }
             }
-            Av::Node(name, _, args) => {
+            Av::Node(name, lineno, args) => {
                 if !SUPPORTED_NODES.contains(name) {
                     return Err(nope(*name));
                 }
@@ -1645,6 +1809,49 @@ other => Err(nope(other.to_string())),
                         }
                     }
                 }
+                // python's codegen writes keyword arguments into generated
+                // source, so a duplicated key makes CPython fail with
+                // `SyntaxError: keyword argument repeated` whose message
+                // embeds generated line numbers -- not reproducible here, so
+                // fall back.  When any key is a python keyword the generator
+                // takes the dict-literal path instead, where a duplicate just
+                // loses to the later entry: exactly what this interpreter
+                // does, so no fallback is needed in that case.
+                // a call block always forwards `caller=`, so an explicit
+                // `caller=` in the target's own keywords duplicates it in the
+                // generated source -- same SyntaxError as above.
+                if *name == "CallBlock" {
+                    if let Some(Av::Node("Call", _, ca)) = args.get(0) {
+                        if let Some(Av::List(kl)) = ca.get(2) {
+                            if !kl.iter().any(|k| is_python_keyword(kw_key(k)))
+                                && kl.iter().any(|k| kw_key(k) == Some("caller"))
+                            {
+                                return Err(nope("call block caller argument"));
+                            }
+                        }
+                    }
+                }
+                if *name == "Call" || *name == "Filter" || *name == "Test" {
+                    // both `Call` and `_FilterTestCommon` nodes keep the
+                    // kwargs list in field slot 2/3 respectively
+                    let kwidx = match *name {
+                        "Call" => 2,
+                        _ => 3,
+                    };
+                    if let Some(Av::List(kl)) = args.get(kwidx) {
+                        if !kl.iter().any(|k| is_python_keyword(kw_key(k))) {
+                            let mut seen: Vec<&str> = Vec::new();
+                            for k in kl {
+                                if let Some(key) = kw_key(k) {
+                                    if seen.iter().any(|s| *s == key) {
+                                        return Err(nope("duplicate keyword argument"));
+                                    }
+                                    seen.push(key);
+                                }
+                            }
+                        }
+                    }
+                }
                 if *name == "For" {
                     if let Some(l) = self.find_loop_store(av) {
                         return Err(EvalErr::Exc(
@@ -1653,6 +1860,46 @@ other => Err(nope(other.to_string())),
                                 Some(l),
                             )?,
                         ));
+                    }
+                }
+                // codegen's macro_body fails when the body references caller
+                // and an explicit `caller` parameter lacks a default.
+                if (*name == "Macro" || *name == "CallBlock") && args.len() >= 4 {
+                    if let (Av::List(p), Av::List(d), Av::List(b)) =
+                        (&args[1], &args[2], &args[3])
+                    {
+                        // `macro_body` only remembers the LAST parameter
+                        // named caller (later occurrences overwrite), and only
+                        // fails when that one has no default -- defaults are
+                        // attached to the trailing parameters.
+                        let last_caller = p.iter().rposition(|pm| {
+                            param_name(pm) == Some("caller")
+                        });
+                        if let Some(idx) = last_caller {
+                            let has_default = idx + d.len() >= p.len();
+                            if !has_default {
+                                let (loads_caller, _, _) = self.find_specials(b);
+                                if loads_caller {
+                                    return Err(EvalErr::Exc(self.assertion_error(
+                                        "When defining macros or call blocks the special \"caller\" argument must be omitted or be given a default.",
+                                        *lineno,
+                                    )?));
+                                }
+                            }
+                        }
+                        // python's own compiler rejects duplicate parameter
+                        // names in the generated function definition with a
+                        // SyntaxError whose message embeds generated line
+                        // numbers -- not reproducible here, so fall back.
+                        let mut seen: Vec<&str> = Vec::new();
+                        for pm in p.iter() {
+                            if let Some(n) = param_name(pm) {
+                                if seen.iter().any(|s| *s == n) {
+                                    return Err(nope("duplicate macro parameter"));
+                                }
+                                seen.push(n);
+                            }
+                        }
                     }
                 }
                 for a in args {
@@ -1761,6 +2008,292 @@ other => Err(nope(other.to_string())),
         }
         self.pop_scope();
         res
+    }
+
+    // ------------------------------------------------------ slice C-v3b --
+    //
+    // Macros and call blocks.  A macro definition creates a real
+    // `runtime.Macro` python object whose func is a rust callable holding the
+    // defining frame chain: closure cells stay alive and writable through the
+    // `Rc`s exactly like the compiled engine's closures over root locals.
+    // Invocations enter a fresh scope frame initialized from the define-time
+    // symbol analysis, bind parameters (missing sentinel -> default expression
+    // evaluated inside the macro frame, or environment.undefined with the
+    // codegen's hint), render the buffered body and return it joined through
+    // `Environment.concat`.  Argument matching itself runs in python's
+    // `Macro.__call__`, byte-identical semantics by construction.
+
+    /// UndeclaredNameVisitor-style detection of the special names inside a
+    /// macro / call block body: a load marks the name as accessed; a store or
+    /// parameter occurrence drops it from tracking afterwards (python's
+    /// discard behaviour), so only loads before the first binding count.
+    fn find_specials(&self, items: &[Av]) -> (bool, bool, bool) {
+        let mut track = [true, true, true];
+        let mut found = [false, false, false];
+        for it in items {
+            self.spec_walk(it, &mut track, &mut found);
+        }
+        (found[0], found[1], found[2])
+    }
+
+    fn spec_walk(&self, av: &Av, track: &mut [bool; 3], found: &mut [bool; 3]) {
+        match av {
+            Av::List(inner) | Av::Tuple(inner) => {
+                for a in inner {
+                    self.spec_walk(a, track, found);
+                }
+            }
+            Av::Node("Name", _, a) => {
+                if a.len() >= 2 {
+                    if let Some(n) = arg_str(&a[0]) {
+                        let idx = match n {
+                            "caller" => Some(0usize),
+                            "kwargs" => Some(1),
+                            "varargs" => Some(2),
+                            _ => None,
+                        };
+                        if let Some(i) = idx {
+                            if track[i] {
+                                if arg_str(&a[1]) == Some("load") {
+                                    found[i] = true;
+                                } else {
+                                    track[i] = false;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Av::Node(_, _, a) => {
+                for x in a {
+                    self.spec_walk(x, track, found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Define-time analysis mirroring `macro_body` + the two `analyze_node`
+    /// passes: occurrence order parameters, defaults, body; implicit specials
+    /// then force PARAM kinds (the `declare_parameter` override).
+    fn analyze_macro(
+        &self,
+        params: &[Av],
+        defaults: &[Av],
+        body: &[Av],
+    ) -> ERes<MacroPlan> {
+        let mut occs: Vec<Occ> = Vec::new();
+        for p in params {
+            self.walk_fsf(p, &mut occs);
+        }
+        for d in defaults {
+            self.walk_fsf(d, &mut occs);
+        }
+        for it in body {
+            self.walk_fsf(it, &mut occs);
+        }
+        let ancestors = self.owned_union();
+        let mut kinds = self.build_kinds(&occs, &ancestors);
+
+        let (loads_caller, loads_kwargs, loads_varargs) = self.find_specials(body);
+        let mut explicit_caller = false;
+        let mut has_kwargs_param = false;
+        let mut has_varargs_param = false;
+        for p in params {
+            match param_name(p) {
+                Some("caller") => explicit_caller = true,
+                Some("kwargs") => has_kwargs_param = true,
+                Some("varargs") => has_varargs_param = true,
+                _ => {}
+            }
+        }
+        let caller_implicit = loads_caller && !explicit_caller;
+        let accesses_kwargs = loads_kwargs && !has_kwargs_param;
+        let accesses_varargs = loads_varargs && !has_varargs_param;
+        if caller_implicit {
+            kinds.insert("caller".to_string(), IK::Param);
+        }
+        if accesses_kwargs {
+            kinds.insert("kwargs".to_string(), IK::Param);
+        }
+        if accesses_varargs {
+            kinds.insert("varargs".to_string(), IK::Param);
+        }
+
+        // defaults belong to the trailing parameters (the parser forbids a
+        // non-default argument after a default one)
+        let l = params.len();
+        let d = defaults.len();
+        let mut plist: Vec<(String, Option<Av>)> = Vec::new();
+        for (i, p) in params.iter().enumerate() {
+            let name = match param_name(p) {
+                Some(n) => n,
+                None => return Err(nope("macro parameter target")),
+            };
+            let def = if i + d >= l {
+                Some(defaults[i + d - l].clone())
+            } else {
+                None
+            };
+            plist.push((name.to_string(), def));
+        }
+        Ok(MacroPlan {
+            kinds,
+            params: plist,
+            accesses_caller: loads_caller,
+            caller_implicit,
+            accesses_kwargs,
+            accesses_varargs,
+        })
+    }
+
+    /// Build the `runtime.Macro` python object for a fresh closure over the
+    /// current defining frame chain.
+    fn make_runtime_macro(
+        &self,
+        name: Option<&str>,
+        plan: &MacroPlan,
+        body: Vec<Av>,
+    ) -> ERes<Bound<'py, PyAny>> {
+        let chain = self.stack.borrow().clone();
+        let func = Py::new(
+            self.py,
+            MacroFunc {
+                session: self.s.clone(),
+                chain,
+                kinds: plan.kinds.clone(),
+                params: plan.params.clone(),
+                caller_slot: plan.caller_implicit,
+                kwargs_slot: plan.accesses_kwargs,
+                varargs_slot: plan.accesses_varargs,
+                body,
+            },
+        )?;
+        let macrocls = self.rt().getattr("Macro")?;
+        let envb = self.env();
+        let argnames: Vec<Bound<'py, PyAny>> = plan
+            .params
+            .iter()
+            .map(|(n, _)| PyString::new(self.py, n).into_any())
+            .collect();
+        let args_tup = PyTuple::new(self.py, argnames)?;
+        let name_arg: Option<String> = name.map(|s| s.to_string());
+        Ok(macrocls.call(
+            (
+                envb,
+                func,
+                name_arg,
+                args_tup,
+                plan.accesses_kwargs,
+                plan.accesses_varargs,
+                plan.accesses_caller,
+                false,
+            ),
+            None,
+        )?)
+    }
+
+    /// Store a named value into the nearest owning slot plus the root-level
+    /// writeback and exported_vars bookkeeping (`visit_Macro` semantics).
+    fn store_named(&self, name: &str, val: &Bound<'py, PyAny>) -> ERes<()> {
+        let mut stored = false;
+        {
+            let frames = self.stack.borrow();
+            for frame in frames.iter().rev() {
+                let mut sc = frame.borrow_mut();
+                if sc.slots.contains_key(name) {
+                    sc.slots.insert(name.to_string(), Some(val.clone().unbind()));
+                    stored = true;
+                    break;
+                }
+            }
+        }
+        if !stored {
+            return Err(nope(format!("store to unowned name {name:?}")));
+        }
+        if self.stack.borrow().len() == 1 {
+            let vars = self.ctx().getattr("vars")?;
+            vars.set_item(name, val)?;
+            if !name.starts_with('_') {
+                let ex = self.ctx().getattr("exported_vars")?;
+                let lst = PyList::new(self.py, [PyString::new(self.py, name)])?;
+                ex.call_method1("update", (&lst,))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn set_top_slot(&self, name: &str, v: &Bound<'py, PyAny>) -> ERes<()> {
+        let top = self.stack.borrow().last().cloned();
+        match top {
+            Some(frame) => {
+                frame
+                    .borrow_mut()
+                    .slots
+                    .insert(name.to_string(), Some(v.clone().unbind()));
+                Ok(())
+            }
+            None => Err(nope("no scope frame to bind")),
+        }
+    }
+
+    fn exec_macro(&self, args: &[Av]) -> ERes<()> {
+        if args.len() < 4 {
+            return Err(nope("bad macro node"));
+        }
+        let name = match arg_str(&args[0]) {
+            Some(s) => s,
+            None => return Err(nope("macro name")),
+        };
+        let (params_v, defaults_v, body_v) = match (&args[1], &args[2], &args[3]) {
+            (Av::List(p), Av::List(d), Av::List(b)) => (p, d, b),
+            _ => return Err(nope("bad macro node")),
+        };
+        let plan = self.analyze_macro(params_v, defaults_v, body_v)?;
+        let obj = self.make_runtime_macro(Some(name), &plan, body_v.clone())?;
+        self.store_named(name, &obj)
+    }
+
+    fn exec_call_block(&self, args: &[Av], out: &mut Vec<Bound<'py, PyAny>>) -> ERes<()> {
+        if args.len() < 4 {
+            return Err(nope("bad call block"));
+        }
+        let (params_v, defaults_v, body_v) = match (&args[1], &args[2], &args[3]) {
+            (Av::List(p), Av::List(d), Av::List(b)) => (p, d, b),
+            _ => return Err(nope("bad call block signature")),
+        };
+        let plan = self.analyze_macro(params_v, defaults_v, body_v)?;
+        let caller = self.make_runtime_macro(None, &plan, body_v.clone())?;
+
+        // the target call runs in the defining frame with `caller=` injected
+        // into the keyword arguments (codegen's forward_caller=True)
+        let (cn, ca) = match parts(&args[0]) {
+            Some(x) => x,
+            None => return Err(nope("bad call node")),
+        };
+        if cn != "Call" || ca.len() < 5 {
+            return Err(nope("call block expects a call node"));
+        }
+        if !matches!(&ca[3], Av::NoneV) || !matches!(&ca[4], Av::NoneV) {
+            return Err(nope("dynamic call block arguments"));
+        }
+        let target = self.node(&ca[0])?;
+        let (alist, kw) = match (&ca[1], &ca[2]) {
+            (Av::List(a), Av::List(k)) => self.sig(a, k, None)?,
+            _ => return Err(nope("call argument lists")),
+        };
+        let kwmap = match kw {
+            Some(d) => d,
+            None => PyDict::new(self.py),
+        };
+        kwmap.set_item("caller", &caller)?;
+        let mut all: Vec<Bound<'py, PyAny>> = Vec::with_capacity(alist.len() + 1);
+        all.push(target);
+        all.extend(alist);
+        let tup = PyTuple::new(self.py, all)?;
+        let rv = self.ctx().call_method("call", tup, Some(&kwmap))?;
+        out.push(self.out_str(&rv)?);
+        Ok(())
     }
 }
 
