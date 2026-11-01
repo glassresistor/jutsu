@@ -103,13 +103,33 @@ The compiler port has two candidate strategies:
       and the `loop` / error-propagation items. Error propagation parity
       (`TemplateRuntimeError`, tracebacks via debug.py -- likely keep
       python-side wrapping).
-* [ ] C-v5: includes and imports (`{% include %}`, `{% import %}`,
-      `{% from %}...{% import %}`): the with/without-context split (the
-      `template.new_context(context.get_all(), True, dump_local_context(frame))`
-      call reuses exactly the machinery of C-v4b), the exported_vars / name
-      discarding rules of named imports, and template modules for `{% import %}`
-      (`_get_default_module` vs `make_module`) -- loaders stay python-side via
-      the existing token-source channel.
+* [x] C-v5: includes and imports implemented.  Lookup function chosen exactly
+      like codegen (literal string -> `get_template`, literal sequence ->
+      `select_template`, anything else -> `get_or_select_template`), always with
+      the current module's name as the loader parent argument; ignore-missing
+      catches only `TemplateNotFound` and only around the lookup, so render-time
+      errors propagate.  With-context renders through python's own
+      `template.new_context(context.get_all(), True, dump_locals())` + root
+      generator parts joining into the caller buffer -- reusing exactly the
+      boundary-aware local dump of C-v4b; without context takes
+      `_get_default_module()._body_stream` (no arguments, so python's module
+      cache behaves as in compiled engines).  `{% import %}` builds a fresh
+      `make_module(...)` or the cached default module *with* this context passed,
+      then applies `visit_Import` store rules including dropping public aliases
+      from exported_vars; named imports go through python's own attribute lookup
+      with codegen's undefined message and per-name batch writeback.  A current-
+      module name (`tname`) is threaded through the interpreter, macro closures,
+      block functions and parent renderings so relative `join_path` resolution
+      matches the compiled modules exactly.  Validation: 34 fixed differential
+      cases plus a join-path suite (three templates discriminating which module
+      a relative include resolves against) in `tests/test_rust_eval.py`, and a
+      structured include/import fuzz corpus (`scripts/include_fuzz.py`, seeds
+      1-3 x400): ok=643 exc=557 fallbacks=0 mismatches=0.  Macro / call-block
+      wrappers are left out of that generator on purpose: python's own machinery
+      swallows some render-time errors raised inside *invoked* macro bodies into
+      unconsumed generator objects whose repr embeds an object address, so those
+      shapes cannot be compared at all (fixed cases cover includes inside macro
+      and caller bodies where nothing raises).
 * [ ] performance pass: measure against python-compiled baseline; only keep
       wins; watch pyo3 round-trips for attribute access and iteration.
 

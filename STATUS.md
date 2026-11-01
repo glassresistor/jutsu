@@ -333,3 +333,67 @@ tests) all green with the rust core active; `cargo test` unchanged at 17.
 Remaining deferred: parent-side error parity instead of fallback, includes /
 imports as slice C-v5.
 
+
+## Evaluator port notes (slice C-v5)
+
+Includes and imports now run inside rust as well, with python's loaders staying
+fully in charge of the actual template loading.  The lookup function is picked
+exactly the way codegen picks it -- a literal string goes to `get_template`, a
+literal sequence to `select_template`, anything else (variables, expressions) to
+`get_or_select_template` -- and every call passes *this module's* name as the
+loader parent argument, so relative names resolve against the template that
+contains the statement.  That last piece needed a notion of "current module":
+the interpreter carries a `tname`, macro closures and block functions capture the
+module they were compiled into (their own `CodeGenerator.name`), and an extends
+parent's rendering swaps it for the parent's name and restores it afterwards --
+one generator per template module, exactly like python.  A join-path suite with
+a path-joining loader environment discriminates all three cases: a child-side
+override's include resolves against the child module, a parent's own block body
+against the parent, and a sub-directory sibling reaches its own directory file.
+
+`ignore missing` catches only `TemplateNotFound` and wraps only the lookup --
+the generated code has no try-block around the rendering itself -- so errors
+raised by included bodies propagate untouched; select-list misses surface as
+python's own `TemplatesNotFound` with the rendered name list, including the
+"none of the templates given were found: ..." message.  With-context includes
+call python's own `template.new_context(context.get_all(), True, dump_locals())`
+and then iterate the root render function pushing its parts into the caller's
+buffer -- reusing byte-for-byte the boundary-aware local dump introduced for
+scoped blocks in C-v4b (the same walk that stops at generated-function symbol
+chains), which is why stores made before the include reach the included body
+while deeper frames stay invisible below boundaries.  Without-context includes
+take `_get_default_module()._body_stream` with no arguments, matching compiled
+engines and letting python cache the module on the `Template` object across
+renders.
+
+Imports mirror `visit_Import` / `visit_FromImport`: `{% import %}` builds a fresh
+module through `make_module(all, True, locals)` when context flows in, otherwise
+the cached default module -- *with* this context passed along so newly appearing
+globals reach it -- and then stores per the codegen rules: slot store always, at
+toplevel additionally a direct write into `context.vars`, plus dropping public
+aliases from `exported_vars` (an imported module never re-exports).  Named
+imports resolve through python's own `getattr(module, name, missing)` falling
+back to an undefined built by the environment with codegen's exact message --
+which quotes the module name and the original attribute name, not the alias.
+
+Validated by 34 fixed differential cases (context splits, ignore-missing versus
+strict raising `TemplateNotFound`, select lists incl. empty-list and nested-list
+errors, dynamic targets through variables incl. undefined names, imports with
+and without context inside loops / block bodies / macro bodies / caller bodies /
+set- and filter-block buffers, underscore aliases keeping their exported_vars
+treatment, included templates that themselves inherit or nest includes, runtime
+errors crossing the module boundary) plus a join-path suite of three path
+templates.  A structured include/import fuzz corpus (`scripts/include_fuzz.py`,
+seeds 1-3 x400): ok=643 exc=557 fallbacks=0 mismatches=0 -- zero fallbacks, so
+every generated shape is now decided by the rust engine.  Macro / call-block
+wrappers are deliberately excluded from that generator: python's own machinery
+swallows some render-time errors raised inside *invoked* macro bodies into
+unconsumed generator objects whose repr embeds an object address, making those
+shapes un-comparable rather than merely different; the fixed cases cover includes
+inside macro and caller bodies where nothing raises.  Statement corpora seeds
+1-2 x8k (`scripts/fuzz_v2.py`), macro corpus seed 1 x3k
+(`scripts/macro_fuzz.py`) and inheritance chains seed 1 x150 all rerun green, the
+full python suite passes at 993 tests with the rust core active, `cargo test`
+unchanged at 17.  Remaining deferred: parent-side error parity instead of
+fallback, async / autoescape / volatile-eval-context environments falling out
+wholesale, and the performance pass.

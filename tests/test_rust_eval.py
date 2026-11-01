@@ -70,9 +70,9 @@ UNSUPPORTED = [
     "{{ f(*args) }}",
     "{{ f(**kw) }}",
     "{{ f(a, *b, **c) }}",
-    # extends targets the interpreter cannot resolve without python loaders
+    # extends parents still come from the token-source channel; includes and
+    # imports go through python's own loaders since slice C-v5.
     "{% extends 'x' %}",
-    "{% include 'x' %}",
 ]
 
 
@@ -960,3 +960,251 @@ def test_scoped_blocks():
         else:
             rrv = "fallback"
         assert pyv == rrv, f"{src!r}: {pyv} != {rrv}"
+
+
+
+# ------------------------------------------------------------ slice C-v5 --
+#
+# Includes and imports: the rust evaluator orchestrates python's own template
+# loading (`environment.get_template` with the module name as parent) and rendering
+# (`root_render_func`, `Template.new_context`, `make_module`, `_get_default_module`)
+# plus the store / exported_vars rules of named imports.  Every case renders through
+# both engines against one DictLoader so parity covers selection, context splits and
+# error propagation.
+
+INC_FILES = {
+    'sub': (
+        '<{% set q = q|default(0) %}{{ q }}>{% macro a() %}MA{% endmacro %}'
+        "{% set b = 'B!' %}"
+    ),
+    'plain': 'P{{ v }}',
+    'see': '>>{{ y }}<',
+    'seez': '[Z{{ z }}]',
+    'blind': '-({{ v }})-',
+    'seew': '(W{{ w }})',
+    'seeq': '~Q{{ q }}~',
+    'low': 'lo!',
+    'kid': "K{% extends 'kidbase' %}{% block kb %}KID{{ q }}{% endblock %}",
+    'kidbase': '[{% block kb %}BASE{% endblock %}]',
+    'boom': "B{{ 1 + 'x' }}",
+    'nest': "(n-{% include 'plain' %})",
+    'wc': "A{% include 'sub' %}B",
+    'nwc': "A{% include 'sub' without context %}B",
+    'wcvar': "Q{% include 'sub' with context %}",
+    'ignore': "A{% include 'nope' ignore missing %}B",
+    'strict': "A{% include 'nope' %}B",
+    'sellist': "S{% include ['nope', 'sub'] %}E",
+    'selmiss': "S{% include ['n1', 'n2'] %}E",
+    'dynname': 'D{% include t %}E',
+    'dynignore': 'D{% include t ignore missing %}E',
+    'dynundef': 'G{% include nope1 %}H',
+    'impwc': "{% import 'sub' as m with context %}[{{ m }}|{{ m.a() }}]",
+    'impnwc': "{% import 'sub' as m %}[{{ m }}]{% if m.b is defined %}-{% endif %}",
+    'fromwc': "A{% from 'sub' import a, b as c with context %}{{ a() }}|{{ c }}B",
+    'frommiss': "{% from 'sub' import nope %}[{{ nope }}x]",
+    'frommiss_use': "{% from 'sub' import nothere %}{{ nothere + 1 }}",
+    'imploop': "{% for i in [1,2] %}{% import 'sub' as m %}{{ m }}{% endfor %}",
+    'infor': "F{% for i in [1,2] %}<{% include 'sub' %}>{% endfor %}",
+    'seeset': "{% set y = 'Y' %}{% include 'see' %}",
+    'loopstore': (
+        "{% for i in [1,2] %}{% set z = i * 2 %}[{% include 'seez' %}]{% endfor %}"
+    ),
+    'nwcblind': "{% set y = 'Y' %}{% include 'blind' without context %}",
+    'inblock': (
+        "S{% block bb scoped %}{% set w = 9 %}<{% include 'seew' %}>{% endblock %}"
+        'E'
+    ),
+    'inmacro': "M{% macro mm() %}<{% include 'seeq' %}>A{% endmacro %}{{ mm() }}Z",
+    'callblock': (
+        'C{% macro pp() %}[in: {{ caller() }}]A{% endmacro %}B{% call pp() %}'
+        "<{% include 'seew' %}>{% endcall %}"
+    ),
+    'filterblock': "F{% filter upper %}k-{% include 'low' %}{% endfilter %}Z",
+    'setblock': "Q{% set sb %}s-{% include 'low' %}{% endset %}[{{ sb }}]",
+    'recursive': (
+        "R{% for i in [0,1] %}|{{ i }}-{% include 'seei' %}{% if i == 0 %}{{ loop([1]) }}"
+        '{% endif %}{% endfor %}'
+    ),
+    'inblockbody': (
+        "B{% block bk %}{% import 'sub' as m %}[{{ m }}]{% endblock %}"
+        '|{% if m is defined %}?{% endif %}'
+    ),
+    'modexport': "N{% from 'sub' import b %}({{ b }}){% include 'plain' %}",
+    'impunder': "U{% import 'sub' as _m %}{% set e = 1 %}{{_m }}|{{ e }}",
+    'fromaliasu': "{% from 'sub' import b as _b %}[{{ _b }}]",
+    'incextends': "E{% include 'kid' %}F",
+    'incraises': "K{% include 'boom' %}",
+    'impraises': "{% import 'boom' as bad %}[{{ bad }}]",
+    'incnested': "N{% include 'nest' %}O",
+}
+
+INC_VARS = {
+    'nwc': {'q': 1},
+    'wcvar': {'q': 5},
+    'sellist': {'q': 2},
+    'dynname': {'t': 'sub', 'q': 3},
+    'dynignore': {'t': 'gone'},
+    'impwc': {'q': 4},
+    'fromwc': {'q': 6},
+    'imploop': {'q': 7},
+    'infor': {'q': 8},
+    'nwcblind': {'v': 3},
+    'inmacro': {'q': 12},
+    'callblock': {'w': 4},
+    'inblockbody': {'q': 9},
+    'impunder': {'q': 1},
+    'incextends': {'q': 10},
+    'incnested': {'q': 13},
+}
+
+CASE_ORDER = [
+    'wc',
+    'nwc',
+    'wcvar',
+    'ignore',
+    'strict',
+    'sellist',
+    'selmiss',
+    'dynname',
+    'dynignore',
+    'dynundef',
+    'impwc',
+    'impnwc',
+    'fromwc',
+    'frommiss',
+    'frommiss_use',
+    'imploop',
+    'infor',
+    'seeset',
+    'loopstore',
+    'nwcblind',
+    'inblock',
+    'inmacro',
+    'callblock',
+    'filterblock',
+    'setblock',
+    'recursive',
+    'inblockbody',
+    'modexport',
+    'impunder',
+    'fromaliasu',
+    'incextends',
+    'incraises',
+    'impraises',
+    'incnested',
+]
+
+
+def check_inc(name):
+    """Render template `name` through both engines against DictLoader."""
+    from jutsu import DictLoader  # noqa: F401
+
+    envp = Environment(loader=DictLoader(INC_FILES))
+    try:
+        p = ("ok", envp.get_template(name).render(**INC_VARS.get(name, {})))
+    except Exception as e:  # noqa: BLE001
+        p = ("exc", type(e).__name__, str(e))
+
+    renv = Environment(loader=DictLoader(INC_FILES))
+    others = {k: v for k, v in INC_FILES.items() if k != name}
+    try:
+        rv = rust_eval.evaluate(
+            renv,
+            INC_FILES[name],
+            name=name,
+            variables=dict(INC_VARS.get(name, {})),
+            templates=others,
+        )
+    except Exception as e:  # noqa: BLE001
+        r = ("exc", type(e).__name__, str(e))
+    else:
+        if isinstance(rv, str):
+            r = ("ok", rv)
+        else:
+            r = "fallback"
+    return p, r
+
+
+def test_includes_imports():
+    """Slice C-v5 parity on the hand-picked include / import shapes."""
+    for name in CASE_ORDER:
+        p, r = check_inc(name)
+        assert r != "fallback", f"{name}: unexpected fallback"
+        assert p == r, f"{name}: {p} != {r}"
+
+
+class JoinEnv(Environment):
+    """Environment where relative includes resolve against the parent path."""
+
+    def join_path(self, template, parent):
+        if parent is not None and "/" not in template:
+            head = parent.rsplit("/", 1)[0]
+            if head != parent:
+                return head + "/" + template
+        return template
+
+
+JOIN_FILES = {
+    'dir/main': (
+        "M{% extends 'dir/base' %}{% block bb %}[{% include 'rel' %}]{% endblock %}"
+    ),
+    'sub/deep': (
+        "S{% extends 'dir/base' %}{% block cc %}K {% include 'rel' %}{% endblock %}"
+    ),
+    'dir/deep': "D{% extends 'dir/base' %}{% block cc %}K{% endblock %}",
+    'dir/base': (
+        "<{% block bb %}>b-{% include 'rel' %}{% endblock %}><{% block cc %}c{% endblock %}"
+        '>|'
+    ),
+    'rel': 'TOPREL{{ q }}',
+    'dir/rel': 'DREL:{{ q }}',
+    'sub/rel': 'SREL:{{ q }}',
+}
+JVARS = {"q": 3}
+
+
+def check_join(name):
+    """Render `name` through both engines under a path-joining loader."""
+    from jutsu import DictLoader  # noqa: F401
+
+    envp = JoinEnv(loader=DictLoader(JOIN_FILES))
+    try:
+        p = ("ok", envp.get_template(name).render(**JVARS))
+    except Exception as e:  # noqa: BLE001
+        p = ("exc", type(e).__name__, str(e))
+
+    renv = JoinEnv(loader=DictLoader(JOIN_FILES))
+    others = {k: v for k, v in JOIN_FILES.items() if k != name}
+    try:
+        rv = rust_eval.evaluate(
+            renv,
+            JOIN_FILES[name],
+            name=name,
+            variables=dict(JVARS),
+            templates=others,
+        )
+    except Exception as e:  # noqa: BLE001
+        r = ("exc", type(e).__name__, str(e))
+    else:
+        if isinstance(rv, str):
+            r = ("ok", rv)
+        else:
+            r = "fallback"
+    return p, r
+
+
+def test_include_join_paths():
+    """Relative includes must resolve against the containing module."""
+    for name in ("dir/main", "dir/deep", "sub/deep"):
+        p, r = check_join(name)
+        assert r != "fallback", f"{name}: unexpected fallback"
+        assert p == r, f"{name}: {p} != {r}"
+    # the discriminating contents themselves: dir/main's override loaded
+    # dir/rel (not sub/rel or top rel), dir/deep ran base's own block against
+    # dir/base, sub/deep mixed both modules.
+    p1, _ = check_join("dir/main")
+    assert "DREL" in p1[1] and "SREL" not in p1[1], p1
+    p2, _ = check_join("dir/deep")
+    assert "b-DREL:3" in p2[1] and "TOPREL" not in p2[1], p2
+    p3, _ = check_join("sub/deep")
+    assert "SREL:3" in p3[1] and "DREL:3" in p3[1], p3

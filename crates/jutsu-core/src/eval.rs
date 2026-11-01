@@ -23,6 +23,7 @@ use crate::parser::{Av, PToken, RtParser};
 use crate::pyrepr::py_repr_str;
 
 pyo3::import_exception!(jutsu.exceptions, TemplateRuntimeError);
+pyo3::import_exception!(jutsu.exceptions, TemplateNotFound);
 
 /// Bail-out from an evaluation attempt.
 pub enum EvalErr {
@@ -79,6 +80,15 @@ pub struct Ev<'py> {
     /// Root executions currently in progress (innermost last), mirroring the
     /// generated `parent_template` local of every root render function.
     ext_stack: RefCell<Vec<Rc<RootExec>>>,
+    /// The name of the template whose generated code is executing right here:
+    /// `CodeGenerator.name`, used for the loader parent argument and for the
+    /// positions embedded into runtime messages.  It follows the module a
+    /// closure was compiled into (macro / caller / block functions capture
+    /// theirs) and switches to an extends parent while that parent renders --
+    /// python compiles one generator per template module, so includes reached
+    /// from a parent body resolve relative names against the parent
+    /// (slice C-v5).
+    tname: RefCell<Option<String>>,
     /// Code-generator flags tracked dynamically over the executed traversal of
     /// a root region (`extends_so_far`, `has_known_extends`, `frame.toplevel`
     /// and `frame.rootlevel`); see slice C-v4 in PLAN_INTERP.md.
@@ -204,6 +214,9 @@ pub struct RootExec {
 pub struct UnitInfo {
     /// The parsed `Template` node.
     tree: Av,
+    /// The name this template was loaded under, i.e. the `CodeGenerator.name`
+    /// of its module (slice C-v5).
+    name: Option<String>,
     /// Block names in document order (`find_all(nodes.Block)`).  Nested blocks
     /// belong to their own template's registry exactly like codegen does.
     names: Vec<String>,
@@ -221,6 +234,7 @@ pub const SUPPORTED_NODES: &[&str] = &[
     "Filter", "Test", "Add", "Sub", "Mul", "Div", "FloorDiv", "Mod", "Pow", "Pos",
     "Neg", "Slice", "Keyword", "Output", "If", "Assign", "AssignBlock", "FilterBlock",
     "For", "With", "NSRef", "Template", "Macro", "CallBlock", "Extends", "Block",
+    "Include", "Import", "FromImport",
 ];
 
 /// Occurrence kinds collected by the scope symbol walk.
@@ -268,6 +282,9 @@ struct MacroPlan {
 #[pyclass(unsendable)]
 pub struct MacroFunc {
     session: Rc<Session>,
+    /// The template name current at the definition site (`CodeGenerator.name`
+    /// of the module this macro was compiled into; slice C-v5).
+    tname: Option<String>,
     /// The python context current at the definition site.  Generated code
     /// closes over the nearest enclosing function's `context` variable, so a
     /// macro defined inside a scoped block invocation resolves through that
@@ -307,6 +324,7 @@ impl MacroFunc {
             self.session.clone(),
             self.chain.clone(),
             self.ctxobj.clone(),
+            self.tname.clone(),
         );
         ev.enter_scope(&self.kinds)?;
         let miss = ev.missing();
@@ -495,12 +513,13 @@ impl<'py> Ev<'py> {
         name: Option<String>,
         srcs: std::collections::HashMap<String, Option<Vec<PToken>>>,
     ) -> Result<Ev<'py>, EvalErr> {
-        let s = Session::build(py, &ctx, &rt, name, srcs)?;
+        let s = Session::build(py, &ctx, &rt, name.clone(), srcs)?;
         Ok(Ev {
             py,
             s,
             stack: RefCell::new(Vec::new()),
             ext_stack: RefCell::new(Vec::new()),
+            tname: RefCell::new(name),
             flags: RefCell::new(BlkFlags::default()),
             local_only: false,
             ctxobj: ctx.unbind(),
@@ -518,12 +537,14 @@ impl<'py> Ev<'py> {
         s: Rc<Session>,
         chain: Vec<Rc<RefCell<Scope>>>,
         ctxobj: Py<PyAny>,
+        tname: Option<String>,
     ) -> Ev<'py> {
         Ev {
             py,
             s,
             stack: RefCell::new(chain),
             ext_stack: RefCell::new(Vec::new()),
+            tname: RefCell::new(tname),
             flags: RefCell::new(BlkFlags::default()),
             local_only: false,
             ctxobj,
@@ -557,8 +578,22 @@ impl<'py> Ev<'py> {
 
     /// Interpreter for a compiled block function body: no defining chain (the
     /// generated functions are module level), and stores stay local (`_block_vars`).
-    fn block_ev(py: Python<'py>, s: Rc<Session>, ctxobj: Py<PyAny>) -> Ev<'py> {
-        Ev { py, s, stack: RefCell::new(Vec::new()), ext_stack: RefCell::new(Vec::new()), flags: RefCell::new(BlkFlags::default()), local_only: true, ctxobj }
+    fn block_ev(
+        py: Python<'py>,
+        s: Rc<Session>,
+        ctxobj: Py<PyAny>,
+        tname: Option<String>,
+    ) -> Ev<'py> {
+        Ev {
+            py,
+            s,
+            stack: RefCell::new(Vec::new()),
+            ext_stack: RefCell::new(Vec::new()),
+            tname: RefCell::new(tname),
+            flags: RefCell::new(BlkFlags::default()),
+            local_only: true,
+            ctxobj,
+        }
     }
 
     fn env(&self) -> Bound<'py, PyAny> {
@@ -572,6 +607,17 @@ impl<'py> Ev<'py> {
     }
     fn rt(&self) -> Bound<'py, PyAny> {
         self.s.rt.bind(self.py).clone()
+    }
+
+    /// The template name the session was started with (the top-level one).
+    fn sname(&self) -> Option<String> {
+        self.s.name.clone()
+    }
+
+    /// The current module's template name (slice C-v5): what python's
+    /// per-module `CodeGenerator` would answer through `self.name`.
+    fn cur_name(&self) -> Option<String> {
+        self.tname.borrow().clone()
     }
     fn filters(&self) -> Bound<'py, PyDict> {
         self.s.filters.bind(self.py).clone()
@@ -962,7 +1008,7 @@ impl<'py> Ev<'py> {
             Some(l) => format!("line {}", l),
             None => "unknown".to_string(),
         };
-        if let Some(nm) = self.s.name.as_ref() {
+        if let Some(nm) = self.cur_name() {
             pos = format!("{} in {}", pos, py_repr_str(nm.as_str()));
         }
         let hint = format!(
@@ -1411,8 +1457,8 @@ other => Err(nope(other.to_string())),
     }
 
     fn exec_one(&self, av: &Av, out: &mut Vec<Bound<'py, PyAny>>) -> ERes<()> {
-        let (name, args): (&str, &[Av]) = match av {
-            Av::Node(n, _, a) => (*n, a),
+        let (name, lineno, args): (&str, Option<u32>, &[Av]) = match av {
+            Av::Node(n, l, a) => (*n, *l, a),
             _ => return Err(nope("statement node expected")),
         };
         match name {
@@ -1508,6 +1554,10 @@ other => Err(nope(other.to_string())),
             "CallBlock" => self.exec_call_block(args, out),
             "Extends" => self.exec_extends(args),
             "Block" => self.exec_block(args, out),
+            // slice C-v5: includes and imports
+            "Include" => self.exec_include(args, out),
+            "Import" => self.exec_import(args),
+            "FromImport" => self.exec_from_import(args, lineno),
             _ => Err(nope(format!("{name} statement outside the subset"))),
         }
     }
@@ -2191,7 +2241,7 @@ other => Err(nope(other.to_string())),
             (
                 msg,
                 lineno.map(|l| l as i64),
-                self.s.name.clone(),
+                self.cur_name(),
                 None::<String>,
             ),
             None,
@@ -2411,10 +2461,12 @@ other => Err(nope(other.to_string())),
     ) -> ERes<Bound<'py, PyAny>> {
         let chain = self.stack.borrow().clone();
         let ctxobj = self.ctx().unbind();
+        let tname = self.cur_name();
         let func = Py::new(
             self.py,
             MacroFunc {
                 session: self.s.clone(),
+                tname,
                 ctxobj,
                 chain,
                 kinds: plan.kinds.clone(),
@@ -2694,7 +2746,11 @@ other => Err(nope(other.to_string())),
     /// Prepare one parsed template into a unit: create its block functions in
     /// document order and reject duplicate names within the same template (the
     /// code generator's `block 'x' defined twice` compile-time failure).
-    fn prepare_unit(&self, tree: &Av) -> Result<Rc<UnitInfo>, EvalErr> {
+    fn prepare_unit(
+        &self,
+        tree: &Av,
+        tname: Option<String>,
+    ) -> Result<Rc<UnitInfo>, EvalErr> {
         let mut found: Vec<(String, Vec<Av>, bool)> = Vec::new();
         self.collect_blocks(tree, &mut found)?;
         let any_extends = has_node_named(tree, "Extends");
@@ -2714,6 +2770,7 @@ other => Err(nope(other.to_string())),
                 self.py,
                 BlockFunc {
                     session: self.s.clone(),
+                    tname: tname.clone(),
                     name: nm.to_string(),
                     body,
                     uses_super: us_super,
@@ -2726,7 +2783,13 @@ other => Err(nope(other.to_string())),
             names.push(nm.to_string());
             funcs.push(func);
         }
-        Ok(Rc::new(UnitInfo { tree: tree.clone(), names, funcs, any_extends }))
+        Ok(Rc::new(UnitInfo {
+            tree: tree.clone(),
+            name: tname,
+            names,
+            funcs,
+            any_extends,
+        }))
     }
 
     /// Register a unit's own block functions into `context.blocks`.  The top
@@ -2763,7 +2826,7 @@ other => Err(nope(other.to_string())),
         };
         self.scan(&tree)?;
         self.check_layout(&tree, true)?;
-        let unit = self.prepare_unit(&tree)?;
+        let unit = self.prepare_unit(&tree, Some(name.to_string()))?;
         self.s.units.borrow_mut().insert(name.to_string(), unit.clone());
         Ok(unit)
     }
@@ -2895,8 +2958,21 @@ other => Err(nope(other.to_string())),
         ))
     }
 
-    /// Run one template unit as a root region (its generated root function).
+    /// Run one template unit as a root region (its generated root function),
+    /// making that module's own name the current one while it renders.
     fn exec_unit(&self, unit: &Rc<UnitInfo>, out: &mut Vec<Bound<'py, PyAny>>) -> ERes<()> {
+        let saved = self.tname.borrow().clone();
+        *self.tname.borrow_mut() = unit.name.clone();
+        let res = self.exec_unit_inner(unit, out);
+        *self.tname.borrow_mut() = saved;
+        res
+    }
+
+    fn exec_unit_inner(
+        &self,
+        unit: &Rc<UnitInfo>,
+        out: &mut Vec<Bound<'py, PyAny>>,
+    ) -> ERes<()> {
         let items = match &unit.tree {
             Av::Node("Template", _, a) => match a.first() {
                 Some(Av::List(l)) => l,
@@ -2961,6 +3037,231 @@ other => Err(nope(other.to_string())),
         res
     }
 
+    // --------------------------------------------------------------- C-v5 --
+    //
+    // Includes and imports.  Loading stays python-side exactly like codegen:
+    // every extra template is fetched through the environment's own lookup
+    // function with this module's name as parent, so loaders (`join_path`,
+    // caches) keep working untouched; included bodies render through python's
+    // compiled engine (`root_render_func` / `_body_stream`) and imported ones
+    // through its real `TemplateModule` objects.  What rust reproduces is the
+    // orchestration around those calls: which lookup function an `{% include %}`
+    // takes, the ignore-missing guard, the with/without-context split (contexts
+    // built by python's own `new_context`, `make_module` and
+    // `_get_default_module`, locals dumped through the C-v4b machinery), and
+    // the store plus exported_vars rules of named imports.
+
+    /// `{% include %}`: pick the lookup function statically exactly like
+    /// `CodeGenerator.visit_Include` -- a constant string goes to
+    /// `get_template`, a literal sequence (python's optimizer folds those into
+    /// a `Const` carrying a tuple/list value, which takes the same branch) to
+    /// `select_template`, everything else to `get_or_select_template`.  The
+    /// last one dispatches on the runtime value, so an unoptimized tree ends up
+    /// making exactly the call python's optimized one does.
+    fn exec_include(
+        &self,
+        args: &[Av],
+        out: &mut Vec<Bound<'py, PyAny>>,
+    ) -> ERes<()> {
+        if args.len() < 3 {
+            return Err(nope("bad include node"));
+        }
+        let func = include_lookup(&args[0]);
+        let val = self.node(&args[0])?;
+        // codegen passes this module's name as the loader parent argument.
+        let parent: Option<String> = self.cur_name();
+        let ignore_missing = matches!(&args[2], Av::Bool(true));
+        let template: Bound<'py, PyAny> = match self.env().call_method(func, (&val, parent), None) {
+            Ok(t) => t,
+            Err(e) => {
+                // `except TemplateNotFound: pass` -- only the lookup sits
+                // inside the try, so render-time errors always propagate.
+                if ignore_missing && e.is_instance_of::<TemplateNotFound>(self.py) {
+                    return Ok(());
+                }
+                return Err(EvalErr::Exc(e));
+            }
+        };
+        if matches!(&args[1], Av::Bool(true)) {
+            // with context: `template.root_render_func(template.new_context(
+            // context.get_all(), True, dump_local_context(frame)))`
+            let all = self.ctx().call_method("get_all", (), None)?;
+            let locals = self.dump_locals()?;
+            let sharedv = true.into_bound_py_any(self.py)?;
+            let newctx = template.call_method("new_context", (&all, &sharedv, &locals), None)?;
+            let gen = template.call_method("root_render_func", (&newctx,), None)?;
+            for p in gen.try_iter()? {
+                out.push(p?);
+            }
+        } else {
+            // without context: `yield from
+            // template._get_default_module()._body_stream` -- no argument,
+            // so the module renders from globals alone and python caches it on
+            // the `Template` object across renders exactly as compiled engines
+            // do.
+            let module = template.call_method("_get_default_module", (), None)?;
+            let body = module.getattr("_body_stream")?;
+            for p in body.try_iter()? {
+                out.push(p?);
+            }
+        }
+        Ok(())
+    }
+
+    /// `_import_common`: always `environment.get_template` (codegen never
+    /// selects here), then build the module object: a fresh one through
+    /// `make_module` when the current context flows in, otherwise the cached
+    /// default module -- *with* this context passed along so newly appearing
+    /// globals reach it.
+    fn import_common(&self, av: &Av, with_context: bool) -> ERes<Bound<'py, PyAny>> {
+        let val = self.node(av)?;
+        let parent: Option<String> = self.cur_name();
+        let tpl: Bound<'py, PyAny> = self.env().call_method("get_template", (&val, parent), None)?;
+        if with_context {
+            let all = self.ctx().call_method("get_all", (), None)?;
+            let locals = self.dump_locals()?;
+            let sharedv = true.into_bound_py_any(self.py)?;
+            Ok(tpl.call_method("make_module", (&all, &sharedv, &locals), None)?)
+        } else {
+            let ctxv = self.ctx();
+            Ok(tpl.call_method1("_get_default_module", (&ctxv,))?)
+        }
+    }
+
+    /// `{% import ... as target %}`: store rules mirror `visit_Import` -- the
+    /// slot store always happens; at toplevel additionally a direct write into
+    /// `context.vars`, and dropping a public name from `exported_vars` (an
+    /// imported module never re-exports).
+    fn exec_import(&self, args: &[Av]) -> ERes<()> {
+        if args.len() < 3 {
+            return Err(nope("bad import node"));
+        }
+        let target = match arg_str(&args[1]) {
+            Some(s) => s,
+            None => return Err(nope("import target")),
+        };
+        let module = self.import_common(&args[0], matches!(&args[2], Av::Bool(true)))?;
+        self.store_owned(target, &module)?;
+        if self.stack.borrow().len() == 1 && !self.local_only {
+            let vars = self.ctx().getattr("vars")?;
+            vars.set_item(target, &module)?;
+            if !target.starts_with('_') {
+                let ex = self.ctx().getattr("exported_vars")?;
+                ex.call_method1("discard", (target,))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `{% from ... import a, b as c %}`: same module path, then per name
+    /// python's own `getattr(included_template, name, missing)` falling back to
+    /// an undefined built by the environment with codegen's exact message --
+    /// which quotes the *module* name and the original attribute name, not the
+    /// alias.  Slot stores happen per name immediately; at toplevel the values
+    /// then go into `context.vars` as one batch and public aliases are dropped
+    /// from exported_vars (`visit_FromImport`).
+    fn exec_from_import(
+        &self,
+        args: &[Av],
+        lineno: Option<u32>,
+    ) -> ERes<()> {
+        if args.len() < 3 {
+            return Err(nope("bad from-import node"));
+        }
+        let names = match &args[1] {
+            Av::List(l) => l,
+            _ => return Err(nope("bad from-import names")),
+        };
+        // codegen loads the module before touching any name.
+        let module = self.import_common(&args[0], matches!(&args[2], Av::Bool(true)))?;
+        let miss = self.missing();
+        let builtins = self.py.import("builtins")?;
+        let getattr_fn = builtins.getattr("getattr")?;
+        let mut entries: Vec<(String, Bound<'py, PyAny>)> = Vec::new();
+        for nm in names.iter() {
+            let (orig, alias): (String, String) = match nm {
+                Av::Str(s) => (s.clone(), s.clone()),
+                Av::Tuple(t) if t.len() >= 2 => match (arg_str(&t[0]), arg_str(&t[1])) {
+                    (Some(a), Some(b)) => (a.to_string(), b.to_string()),
+                    _ => return Err(nope("bad import name")),
+                },
+                _ => return Err(nope("bad import name")),
+            };
+            let got: Bound<'py, PyAny> = getattr_fn.call((&module, orig.as_str(), &miss), None)?;
+            let value: Bound<'py, PyAny> = if got.is(&miss) {
+                // `included_template.__name__` -- the module object carries it,
+                // never the template's own name attribute.
+                let modrepr = self.py_repr(&module.getattr("__name__")?)?;
+                let pos = self.position(lineno);
+                let msg = format!(
+                    "the template {} (imported on {}) does not export the requested name {}",
+                    modrepr,
+                    pos,
+                    py_repr_str(orig.as_str())
+                );
+                let kw = PyDict::new(self.py);
+                kw.set_item("name", orig.as_str())?;
+                self.undef().call((msg.as_str(),), Some(&kw))?
+            } else {
+                got
+            };
+            self.store_owned(&alias, &value)?;
+            entries.push((alias, value));
+        }
+        if !entries.is_empty() && self.stack.borrow().len() == 1 && !self.local_only {
+            let vars = self.ctx().getattr("vars")?;
+            let ex = self.ctx().getattr("exported_vars")?;
+            for (alias, v) in entries.iter() {
+                vars.set_item(alias.as_str(), v)?;
+                if !alias.starts_with('_') {
+                    ex.call_method1("discard", (alias.as_str(),))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Store into the nearest owning slot for a bare name -- codegen writes to
+    /// `frame.symbols.ref(name)`, which resolves through the symbol chain.
+    fn store_owned(&self, name: &str, val: &Bound<'py, PyAny>) -> ERes<()> {
+        let stored = {
+            let frames = self.stack.borrow();
+            let mut done = false;
+            for frame in frames.iter().rev() {
+                let mut sc = frame.borrow_mut();
+                if sc.slots.contains_key(name) {
+                    sc.slots.insert(name.to_string(), Some(val.clone().unbind()));
+                    done = true;
+                    break;
+                }
+            }
+            done
+        };
+        if !stored {
+            return Err(nope(format!("store to unowned name {:?}", name)));
+        }
+        Ok(())
+    }
+
+    /// `repr()` through python so f-string `!r` semantics carry over exactly.
+    fn py_repr(&self, obj: &Bound<'py, PyAny>) -> ERes<String> {
+        let builtins = self.py.import("builtins")?;
+        let rep_fn = builtins.getattr("repr")?;
+        Ok(rep_fn.call1((obj,))?.extract::<String>()?)
+    }
+
+    /// `CodeGenerator.position`: "line N" plus the module name when known.
+    fn position(&self, lineno: Option<u32>) -> String {
+        let mut pos = match lineno {
+            Some(l) => format!("line {}", l),
+            None => "unknown line".to_string(),
+        };
+        if let Some(nm) = self.cur_name() {
+            pos = format!("{} in {}", pos, py_repr_str(nm.as_str()));
+        }
+        pos
+    }
+
     fn spec1_walk(&self, av: &Av, track: &mut [bool; 1], found: &mut [bool; 1]) {
         match av {
             Av::List(inner) | Av::Tuple(inner) => {
@@ -2991,6 +3292,19 @@ other => Err(nope(other.to_string())),
     }
 
 
+}
+
+/// The template-lookup function codegen picks for an `{% include %}` target
+/// expression (slice C-v5); see `Ev::exec_include`.
+pub fn include_lookup(av: &Av) -> &'static str {
+    match av {
+        Av::Node("Const", _, a) => match a.first() {
+            Some(Av::Str(_)) => "get_template",
+            _ => "get_or_select_template",
+        },
+        Av::Node("Tuple" | "List", _, _) => "select_template",
+        _ => "get_or_select_template",
+    }
 }
 
 fn body_of(args: &[Av]) -> &[Av] {
@@ -3044,6 +3358,8 @@ fn has_node_named(av: &Av, want: &str) -> bool {
 pub struct BlockFunc {
     session: Rc<Session>,
     name: String,
+    /// The template module this block function was compiled into (slice C-v5).
+    tname: Option<String>,
     body: Vec<Av>,
     uses_super: bool,
     uses_self: bool,
@@ -3057,7 +3373,12 @@ impl BlockFunc {
         py: Python<'py>,
         context: &Bound<'py, PyAny>,
     ) -> Result<Vec<Bound<'py, PyAny>>, EvalErr> {
-        let ev = Ev::block_ev(py, self.session.clone(), context.clone().unbind());
+        let ev = Ev::block_ev(
+            py,
+            self.session.clone(),
+            context.clone().unbind(),
+            self.tname.clone(),
+        );
         let mut occs: Vec<Occ> = Vec::new();
         for it in &self.body {
             ev.walk_fsf(it, &mut occs);
@@ -3166,7 +3487,7 @@ pub fn evaluate_with_sources<'py>(
         }
     }
     // prepare and register the top template's own blocks before anything runs.
-    let unit = match ev.prepare_unit(av) {
+    let unit = match ev.prepare_unit(av, ev.sname()) {
         Ok(u) => u,
         Err(EvalErr::Unsupported(u)) => return EvalOutcome::Unsupported(u),
         Err(EvalErr::Exc(x)) => return EvalOutcome::Exc(x),
