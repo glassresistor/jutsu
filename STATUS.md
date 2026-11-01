@@ -394,6 +394,7 @@ inside macro and caller bodies where nothing raises.  Statement corpora seeds
 1-2 x8k (`scripts/fuzz_v2.py`), macro corpus seed 1 x3k
 (`scripts/macro_fuzz.py`) and inheritance chains seed 1 x150 all rerun green, the
 full python suite passes at 993 tests with the rust core active, `cargo test`
-unchanged at 17.  Remaining deferred: parent-side error parity instead of
-fallback, async / autoescape / volatile-eval-context environments falling out
-wholesale, and the performance pass.
+unchanged at 17.
+
+Slice C-v6 -- autoescape and volatile regions.  The code generator's compile-time evaluation context is now mirrored per region next to the live one, so constant folding (including python's non-markup-aware `Concat.as_const`), wrapper choice and markup joins follow the generated engine exactly; `{% autoescape %}` tags with foldable options fix wrappers at entry while volatile regions consult the live attribute per part.  Block functions compile from module-start defaults because python emits them after every scoped tag reverted, which also exposed a latent bug: silent block invocations nested inside scope tags after a known top-level extend were dropped wholesale instead of only while the frame chain stays toplevel (python renders such overrides twice -- once through the inheritance chain and once at their position).  Call blocks, filter blocks and recursion levels push raw objects into the caller buffer.  Fixed suites plus new autoescape parity and inheritance probes green; statement seed 1 x8k rerun ok=1343 exc=6576 fb=81 zero diffs, include/macro/block corpora rerun zero mismatches, suite at 994 tests, cargo test still 17.  Remaining deferred: parent-side error parity instead of fallback, async environments falling out wholesale,
+and the performance pass.

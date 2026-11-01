@@ -575,14 +575,108 @@ def test_unpack_of_undefined_matches():
     assert r == p, f"{r} != {p}"
 
 
-def test_autoescape_falls_back():
-    """Autoescape needs the dedicated markup slice (compile-time constant
-    folding is not markup aware in the python code generator), so every
-    autoescape environment must fall back to the python engine for now.
-    """
-    env = Environment(autoescape=True)
-    for src in ["{{ '<b>' }}", "{{ 'a' ~ '<b>' }}", "static {{ x }} dyn"]:
-        assert rust_eval.evaluate(env, src, variables={"x": "<y>"}) is None, src
+def _ae_pair(env_maker, src, vars_, name=None):
+    """Render `src` through both engines on equivalent environments."""
+    env1 = env_maker()
+    try:
+        py = ("ok", env1.from_string(src).render(**(vars_ or {})))
+    except Exception as e:  # noqa: BLE001
+        py = ("exc", type(e).__name__, str(e))
+    env2 = env_maker()
+    try:
+        rv = rust_eval.evaluate(env2, src, variables=vars_, name=name)
+        if isinstance(rv, str):
+            r = ("ok", rv)
+        else:
+            r = "fallback"
+    except Exception as e:  # noqa: BLE001
+        r = ("exc", type(e).__name__, str(e))
+    return py, r
+
+
+AE_CASES = [
+    # compile-time constant folding is not markup aware: literal concat joins
+    # parts with plain str() semantics before the output wrapper escapes.
+    "{{ '<b>' }}",
+    "{{ 'a' ~ none }}",
+    "{{ ('<i>')|safe ~ '<j>' }}",
+    "{{ none ~ '' }}",
+    "{% autoescape true %}{{ '<x>' }}{% endautoescape %}",
+    # volatile regions: compile-time folding stays escaped while the live
+    # attribute drives only the non-foldable children's wrappers.
+    "{% autoescape sv %}static<b>{{ '<t>' }}</b>{% endautoescape %}",
+    "{% autoescape false %}<p>{{ '<y>' }}</p>{% endautoescape %}",
+    "{% autoescape true %}{% filter replace('<', '>') %}<i>x{% endfilter %}"
+    "{{'<z>'}}{% endautoescape %}",
+    # volatile + set blocks consult the live attribute for the stored value.
+    "{% autoescape sv %}{% set y %}<t>{% endset %}[{{ y }}]"
+    "{% endautoescape %}",
+]
+
+
+def test_autoescape_parity():
+    """Slice C-v6: markup, constant folding and volatile eval contexts are
+    decided by the rust evaluator exactly like python's code generator."""
+
+    def mk_ae():
+        return Environment(autoescape=True)
+
+    def mk_plain():
+        return Environment()
+
+    for src in AE_CASES:
+        for maker in (mk_ae, mk_plain):
+            for vars_ in ({}, {"sv": True}, {"sv": False}):
+                py, r = _ae_pair(maker, src, vars_)
+                assert r != "fallback", f"{src!r}: unexpected fallback"
+                assert py == r, f"{src!r} {vars_} {maker.__name__}: {py} != {r}"
+
+
+AE_INHERIT_CHAIN = {
+    "P0": "P0{% autoescape true %}<p>{% block pb %}PB<i>{{ '<pv>' }}</i>"
+          "{% endblock %}{% endautoescape %}|Q{{ '<q>' }}",
+    "C0": "{% extends 'P0' %}{% block pb %}CO{{ '<o>' }}{% endblock %}",
+    "CH2": "{% extends 'P0' %}{% autoescape true %}{% block pb %}<c>{{ '<c>' }}"
+          "</c>{% endblock %}{% endautoescape %}T{{ '<t>' }}",
+    "P3": "{% autoescape false %}<pb>{% block pb %}<p>{{ '<p>' }}</p>"
+         "{% endblock %}{% endautoescape %}R<r>",
+    "C3": "{% extends 'P3' %}",
+}
+
+
+def _ae_inherit(env_maker, name):
+    srcs = AE_INHERIT_CHAIN
+
+    def mk():
+        return env_maker(AE_INHERIT_CHAIN)
+
+    try:
+        py = ("ok", mk().get_template(name).render())
+    except Exception as e:  # noqa: BLE001
+        py = ("exc", type(e).__name__, str(e))
+    try:
+        rv = rust_eval.evaluate(mk(), srcs[name], name=name, templates=srcs)
+        if isinstance(rv, str):
+            r = ("ok", rv)
+        else:
+            r = "fallback"
+    except Exception as e:  # noqa: BLE001
+        r = ("exc", type(e).__name__, str(e))
+    return py, r
+
+
+def test_autoescape_inheritance():
+    """Blocks compile after the scoped traversal reverted: in-region block
+    overrides keep module-start wrappers and nested invocations still run."""
+
+    def mk_ae(srcs):
+        from jutsu import DictLoader
+        return Environment(loader=DictLoader(srcs), autoescape=True)
+
+    for name in ("P0", "C0", "CH2", "P3", "C3"):
+        py, r = _ae_inherit(mk_ae, name)
+        assert r != "fallback", f"{name}: unexpected fallback"
+        assert py == r, f"{name}: {py} != {r}"
 
 
 def test_async_falls_back():

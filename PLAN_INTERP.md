@@ -130,6 +130,40 @@ The compiler port has two candidate strategies:
       unconsumed generator objects whose repr embeds an object address, so those
       shapes cannot be compared at all (fixed cases cover includes inside macro
       and caller bodies where nothing raises).
+* [x] C-v6: autoescape/Markup/volatile integration.  The code generator's
+      compile-time `EvalContext` is mirrored as a per-region state (`aestate`)
+      beside the live eval context object; `{% autoescape %}` tags with a
+      foldable option fix wrapper decisions for their region, non-foldable ones
+      make it volatile and let generated runtime checks consult the *live*
+      attribute.  Output children constant-fold through a rust `as_const`
+      graph mirroring every python fold rule (`Concat.as_const` joins parts
+      with plain `str()` -- `None` becomes 'None', filters get called),
+      escaped per compile flag; volatile regions still fold (the default
+      environment has a `finalize.const`) and only un-foldable children take
+      the live check.  Static template data is never escaped: non-volatile
+      frames return its value text, volatile ones wrap it in Markup before
+      the outer escape for no-op.  Block functions always compile at
+      module-start defaults because python emits them after the root
+      traversal reverted every scoped tag; this slice also fixed a latent
+      bug where nested silent block invocations after a known top-level
+      extend were dropped -- python only consults the codegen flags while
+      the frame chain is still toplevel, so scope-tagged blocks keep their
+      own calls (a child template even renders an override *twice*, once
+      through the inheritance chain and once at its position).  Call-block,
+      filter-block and recursion results go into the caller buffer as raw
+      objects (`start_write`/`end_write`, `return_buffer_contents`), Markup
+      wrapping follows the compile flag except in volatile regions where a
+      live check applies; set-block storage always uses the live check.
+      Validated by two new parity suites (18 autoescape shapes incl. nested
+      scoped tags, undefined options and filter/set blocks under live wraps,
+      plus inheritance probes for the doubling quirk -- `scripts/probe_ae.py`,
+      `scripts/probe_ae2.py`) folded into `tests/test_rust_eval.py`; include
+      corpus seed 1 ok=211 exc=189 fb=0 mismatches=0, statement seeds 1-2,
+      macro seed 1 x3k and block fuzz rerun green at zero mismatches, full
+      python suite passes at 994 tests with the rust core active, `cargo
+      test` unchanged at 17.  Remaining deferred: parent-side error parity
+      instead of fallback, async environments falling out wholesale, and the
+      performance pass.
 * [ ] performance pass: measure against python-compiled baseline; only keep
       wins; watch pyo3 round-trips for attribute access and iteration.
 

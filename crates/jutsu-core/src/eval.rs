@@ -106,6 +106,15 @@ pub struct Ev<'py> {
     /// mirroring the generated code's closure over the nearest enclosing
     /// function's `context` variable.
     ctxobj: Py<PyAny>,
+    /// Compile-time evaluation-context state of the region this interpreter
+    /// currently runs (slice C-v6): mirrors the code generator's shared
+    /// `EvalContext` object while it visits -- `ae` is its autoescape value,
+    /// `vol` the volatile flag set by `{% autoescape %}` tags whose option
+    /// expression cannot be folded at compile time.  It decides which
+    /// constant folding python performed ahead of time (and therefore which
+    /// wrappers and joins the generated code uses), independently of the
+    /// *live* eval context attribute that runtime checks consult.
+    aestate: RefCell<AeState>,
 }
 
 /// The inheritance bookkeeping of the code generator, mirrored at runtime.
@@ -126,6 +135,19 @@ impl Default for BlkFlags {
     fn default() -> Self {
         BlkFlags { seen_any: false, known_top: false, chain_top: false, chain_root: false }
     }
+}
+
+/// The code generator's compile-time eval-context state over a region,
+/// mirrored at runtime (slice C-v6).  `ae` is the autoescape attribute value
+/// as seen during compilation; `vol` the volatile flag an `{% autoescape %}`
+/// tag sets when its option expression cannot be folded.  Generated wrappers
+/// consult *this* state for everything but the explicit runtime checks
+/// (`context.eval_ctx.autoescape`) that only exist inside volatile regions,
+/// where the compile-time attribute keeps holding the enclosing value.
+#[derive(Clone, Copy, PartialEq)]
+pub struct AeState {
+    pub vol: bool,
+    pub ae: bool,
 }
 
 /// One runtime scope frame: slots by name; `None` is the `missing` sentinel.
@@ -234,7 +256,7 @@ pub const SUPPORTED_NODES: &[&str] = &[
     "Filter", "Test", "Add", "Sub", "Mul", "Div", "FloorDiv", "Mod", "Pow", "Pos",
     "Neg", "Slice", "Keyword", "Output", "If", "Assign", "AssignBlock", "FilterBlock",
     "For", "With", "NSRef", "Template", "Macro", "CallBlock", "Extends", "Block",
-    "Include", "Import", "FromImport",
+    "Include", "Import", "FromImport", "Scope", "ScopedEvalContextModifier",
 ];
 
 /// Occurrence kinds collected by the scope symbol walk.
@@ -297,6 +319,10 @@ pub struct MacroFunc {
     kwargs_slot: bool,
     varargs_slot: bool,
     body: Vec<Av>,
+    /// Compile-time eval-context state at the definition site (slice C-v6):
+    /// python compiles a macro function inline where its node is visited, so
+    /// the wrappers inside it follow that region's flags, not the caller's.
+    aestate: AeState,
 }
 
 #[pymethods]
@@ -325,6 +351,7 @@ impl MacroFunc {
             self.chain.clone(),
             self.ctxobj.clone(),
             self.tname.clone(),
+            self.aestate,
         );
         ev.enter_scope(&self.kinds)?;
         let miss = ev.missing();
@@ -453,14 +480,20 @@ impl Session {
         if volatile {
             return Err(nope("volatile eval context"));
         }
-        let autoescape: bool = evalctx.getattr("autoescape")?.extract()?;
-        if autoescape {
-            // The python code generator folds constant output children at
-            // compile time with plain joins (`Concat.as_const`), which is not
-            // markup aware; reproducing that together with `markup_join`
-            // semantics is the dedicated autoescape slice (see TODO.md).
-            return Err(nope("autoescape environment"));
+        // A callable autoescape policy resolves per template name in
+        // `EvalContext.__init__`; with inheritance each module compiles under
+        // its own name while the runtime context carries another one, so the
+        // two decisions can disagree.  Only plain boolean policies are served.
+        if !env.getattr("autoescape")?.is_instance_of::<pyo3::types::PyBool>() {
+            return Err(nope("non-boolean autoescape policy"));
         }
+        // The evaluator calls `environment.getattr/getitem/call` directly,
+        // bypassing the sandbox's intercepting machinery (which also gates
+        // constant folding through `intercepted_binops`).
+        if env.getattr("sandboxed")?.is_truthy()? {
+            return Err(nope("sandboxed environment"));
+        }
+        let autoescape: bool = evalctx.getattr("autoescape")?.extract()?;
         // an async-enabled environment awaits coroutines and consumes async
         // iterables even in the synchronous `render` path; driving that from
         // rust means porting the whole async runtime, so fall back.
@@ -514,6 +547,7 @@ impl<'py> Ev<'py> {
         srcs: std::collections::HashMap<String, Option<Vec<PToken>>>,
     ) -> Result<Ev<'py>, EvalErr> {
         let s = Session::build(py, &ctx, &rt, name.clone(), srcs)?;
+        let st = AeState { vol: false, ae: s.autoescape };
         Ok(Ev {
             py,
             s,
@@ -523,6 +557,7 @@ impl<'py> Ev<'py> {
             flags: RefCell::new(BlkFlags::default()),
             local_only: false,
             ctxobj: ctx.unbind(),
+            aestate: RefCell::new(st),
         })
     }
 
@@ -538,6 +573,7 @@ impl<'py> Ev<'py> {
         chain: Vec<Rc<RefCell<Scope>>>,
         ctxobj: Py<PyAny>,
         tname: Option<String>,
+        aestate: AeState,
     ) -> Ev<'py> {
         Ev {
             py,
@@ -548,6 +584,7 @@ impl<'py> Ev<'py> {
             flags: RefCell::new(BlkFlags::default()),
             local_only: false,
             ctxobj,
+            aestate: RefCell::new(aestate),
         }
     }
 
@@ -583,6 +620,7 @@ impl<'py> Ev<'py> {
         s: Rc<Session>,
         ctxobj: Py<PyAny>,
         tname: Option<String>,
+        aestate: AeState,
     ) -> Ev<'py> {
         Ev {
             py,
@@ -593,6 +631,7 @@ impl<'py> Ev<'py> {
             flags: RefCell::new(BlkFlags::default()),
             local_only: true,
             ctxobj,
+            aestate: RefCell::new(aestate),
         }
     }
 
@@ -640,10 +679,6 @@ impl<'py> Ev<'py> {
     fn ns(&self) -> Bound<'py, PyAny> {
         self.s.ns.bind(self.py).clone()
     }
-    fn autoescape(&self) -> bool {
-        self.s.autoescape
-    }
-
 
     /// Raw context lookup: `Context.resolve_or_missing`, `None` for missing.
     fn raw_resolve(&self, name: &str) -> Result<Option<Py<PyAny>>, PyErr> {
@@ -778,27 +813,399 @@ impl<'py> Ev<'py> {
         }
     }
 
-    fn out_str(&self, v: &Bound<'py, PyAny>) -> ERes<Bound<'py, PyAny>> {
-        if self.autoescape() {
-            let esc = self.rt().getattr("escape")?;
-            Ok(esc.call1((v,))?.str()?.into_any())
+    /// Truthy value of the *live* eval-context autoescape attribute (the
+    /// shared mutable `EvalContext` object; slice C-v6).  Runtime checks in
+    /// generated code (`context.eval_ctx.autoescape`) consult this, while the
+    /// compile-time state lives in `Ev::aestate`.
+    fn live_ae(&self) -> Result<bool, PyErr> {
+        Ok(self.evalctx().getattr("autoescape")?.is_truthy()?)
+    }
+
+    /// Wrap one runtime-evaluated output expression child: outside volatile
+    /// regions the wrapper is fixed by the compile-time flags (`str(...)` or
+    /// `escape(...)`); inside them the generated code checks the live
+    /// attribute per part.
+    fn out_wrap(&self, v: &Bound<'py, PyAny>) -> ERes<Bound<'py, PyAny>> {
+        let st = *self.aestate.borrow();
+        if !st.vol {
+            return Ok(if st.ae { self.rt().getattr("escape")?.call1((v,))? } else { v.str()?.into_any() });
+        }
+        if self.live_ae()? {
+            Ok(self.rt().getattr("escape")?.call1((v,))?)
         } else {
             Ok(v.str()?.into_any())
         }
     }
 
-    /// Concatenation of a `Concat` node (`~`), which is markup aware.  The
-    /// python code generator uses `markup_join` when autoescape is on and
-    /// `str_join` otherwise.
-    fn concat_values(&self, parts: Vec<Bound<'py, PyAny>>) -> ERes<Bound<'py, PyAny>> {
+    /// Join of a runtime-evaluated `Concat` node.  Only non-volatile frames
+    /// with the compile-time autoescape flag use `markup_join`; volatile
+    /// regions emit `(markup_join if context.eval_ctx.volatile else
+    /// str_join)` and python's eval contexts are never volatile at runtime,
+    /// so they always take the plain join -- even when the live attribute is
+    /// on (slice C-v6).
+    fn ae_join(&self, parts: Vec<Bound<'py, PyAny>>) -> ERes<Bound<'py, PyAny>> {
         let tup = PyTuple::new(self.py, parts)?;
-        if self.autoescape() {
+        let st = *self.aestate.borrow();
+        if !st.vol && st.ae {
             let mj = self.rt().getattr("markup_join")?;
             Ok(mj.call1((tup,))?)
         } else {
             let sj = self.rt().getattr("str_join")?;
             Ok(sj.call1((tup,))?)
         }
+    }
+
+    /// Fold a subtree to a constant value exactly like the code generator's
+    /// compile-time `as_const` machinery: "Impossible" becomes "cannot fold",
+    /// and an error raised while folding is not an error here but simply
+    /// non-foldability -- generated code re-evaluates such subtrees at render
+    /// time anyway, so both engines agree as long as folded values are pure.
+    /// `vol`/`ae` carry what python's shared eval-context object would hold
+    /// while visiting this position: volatile regions fold nothing (the guards
+    /// live inside the individual `as_const` implementations), and autoescape
+    /// decides whether template data comes back wrapped in Markup.  There is
+    /// deliberately no safe-repr gate anywhere here: at every optimizer site a
+    /// rejected inner replacement still lets the parent's own recursive fold
+    /// reach the same value through the direct `as_const` calls, and the one
+    /// caller without any optimizer (the autoescape tag's option check) gets
+    /// precisely that ungated call.
+    fn try_fold(
+        &self,
+        r: std::result::Result<Bound<'py, PyAny>, PyErr>,
+    ) -> ERes<Option<Bound<'py, PyAny>>> {
+        match r { Ok(v) => Ok(Some(v)), Err(_) => Ok(None) }
+    }
+
+    fn fold(
+        &self,
+        av: &Av,
+        vol: bool,
+        ae: bool,
+    ) -> ERes<Option<Bound<'py, PyAny>>> {
+        let (name, args): (&str, &[Av]) = match av {
+            Av::Node(n, _, a) => (*n, a),
+            _ => return Ok(None),
+        };
+        match name {
+            "Const" => match args.first() { Some(x) => Ok(Some(self.lit(x)?)), None => Ok(None) },
+            "TemplateData" => {
+                if vol {
+                    return Ok(None);
+                }
+                let raw = match args.first() { Some(x) => self.lit(x)?, None => return Ok(None) };
+                if !ae {
+                    return Ok(Some(raw));
+                }
+                self.try_fold(self.rt().getattr("Markup")?.call1((&raw,)))
+            }
+            "Tuple" | "List" => {
+                let items = match args.first() { Some(Av::List(l)) => l, _ => return Ok(None) };
+                let mut vals: Vec<Bound<'py, PyAny>> = Vec::new();
+                for it in items {
+                    match self.fold(it, vol, ae)? {
+                        Some(v) => vals.push(v),
+                        None => return Ok(None),
+                    }
+                }
+                if name == "Tuple" {
+                    let t = PyTuple::new(self.py, &vals)?;
+                    return Ok(Some(t.into_any()));
+                }
+                let l = PyList::new(self.py, &vals)?;
+                return Ok(Some(l.into_any()));
+            }
+            "Dict" => {
+                let items = match args.first() { Some(Av::List(l)) => l, _ => return Ok(None) };
+                let d = PyDict::new(self.py);
+                for it in items {
+                    let (pn, pa) = match parts(it) {
+                        Some(x) => x,
+                        None => return Ok(None),
+                    };
+                    if pn != "Pair" || pa.len() < 2 {
+                        return Ok(None);
+                    }
+                    let k = match self.fold(&pa[0], vol, ae)? { Some(v) => v, None => return Ok(None) };
+                    let v = match self.fold(&pa[1], vol, ae)? { Some(v) => v, None => return Ok(None) };
+                    d.set_item(&k, &v)?;
+                }
+                return Ok(Some(d.into_any()));
+            }
+            "CondExpr" => {
+                if args.len() < 3 {
+                    return Ok(None);
+                }
+                let t = match self.fold(&args[0], vol, ae)? { Some(v) => v, None => return Ok(None) };
+                if t.is_truthy()? {
+                    return self.fold(&args[1], vol, ae);
+                }
+                // folding to an implicit undefined is best done at runtime
+                if matches!(&args[2], Av::NoneV) {
+                    return Ok(None);
+                }
+                self.fold(&args[2], vol, ae)
+            }
+            "And" | "Or" => {
+                if args.len() < 2 {
+                    return Ok(None);
+                }
+                let l = match self.fold(&args[0], vol, ae)? { Some(v) => v, None => return Ok(None) };
+                let truthy = l.is_truthy()?;
+                if truthy == (name == "Or") {
+                    return Ok(Some(l));
+                }
+                self.fold(&args[1], vol, ae)
+            }
+            "Not" | "Neg" | "Pos" => {
+                if args.is_empty() {
+                    return Ok(None);
+                }
+                let v = match self.fold(&args[0], vol, ae)? { Some(v) => v, None => return Ok(None) };
+                match name {
+                    "Not" => Ok(Some((!v.is_truthy()?).into_bound_py_any(self.py)?)),
+                    "Neg" => self.try_fold(v.neg()),
+                    _ => self.try_fold(v.pos()),
+                }
+            }
+            "Add" | "Sub" | "Mul" | "Div" | "FloorDiv" | "Pow" | "Mod" => {
+                if args.len() < 2 {
+                    return Ok(None);
+                }
+                let a = match self.fold(&args[0], vol, ae)? { Some(v) => v, None => return Ok(None) };
+                let b = match self.fold(&args[1], vol, ae)? { Some(v) => v, None => return Ok(None) };
+                let r: std::result::Result<Bound<'py, PyAny>, PyErr> = match name {
+                    "Add" => a.add(&b),
+                    "Sub" => a.sub(&b),
+                    "Mul" => a.mul(&b),
+                    "Div" => a.div(&b),
+                    "FloorDiv" => a.floor_div(&b),
+                    "Mod" => a.rem(&b),
+                    _ => a.pow(&b, self.py.None()),
+                };
+                self.try_fold(r)
+            }
+            "Compare" => {
+                if args.len() < 2 {
+                    return Ok(None);
+                }
+                match &args[1] {
+                    Av::List(ops) => self.fold_cmp(&args[0], ops, vol, ae),
+                    _ => Ok(None),
+                }
+            }
+            "Concat" => {
+                // python's `Concat.as_const` joins the parts with plain str()
+                // -- the documented non-markup-aware fold (`None` becomes 'None').
+                let ps = match args.first() { Some(Av::List(l)) => l, _ => return Ok(None) };
+                let mut buf = String::new();
+                for pt in ps {
+                    let v = match self.fold(pt, vol, ae)? { Some(v) => v, None => return Ok(None) };
+                    buf.push_str(&v.str()?.extract::<String>()?);
+                }
+                Ok(Some(PyString::new(self.py, &buf).into_any()))
+            }
+            "Getattr" | "Getitem" => {
+                if args.len() < 2 {
+                    return Ok(None);
+                }
+                // only load-context references fold.
+                if args.len() >= 3 && arg_str(&args[2]) != Some("load") {
+                    return Ok(None);
+                }
+                let obj = match self.fold(&args[0], vol, ae)? { Some(v) => v, None => return Ok(None) };
+                if name == "Getattr" {
+                    let attr = match arg_str(&args[1]) { Some(s) => s, None => return Ok(None) };
+                    self.try_fold(self.env().call_method1("getattr", (&obj, attr)))
+                } else {
+                    let key = match self.fold(&args[1], vol, ae)? { Some(v) => v, None => return Ok(None) };
+                    self.try_fold(self.env().call_method1("getitem", (&obj, &key)))
+                }
+            }
+            "Filter" | "Test" => self.fold_filter_test(args, name == "Filter", vol, ae),
+            "Slice" => {
+                let mut vals: Vec<Bound<'py, PyAny>> = Vec::new();
+                for p in args.iter().take(3) {
+                    if matches!(p, Av::NoneV) {
+                        vals.push(self.none());
+                        continue;
+                    }
+                    match self.fold(p, vol, ae)? {
+                        Some(v) => vals.push(v),
+                        None => return Ok(None),
+                    }
+                }
+                while vals.len() < 3 {
+                    vals.push(self.none());
+                }
+                let sl = self.slice_cls().call(
+                    (vals[0].clone(), vals[1].clone(), vals[2].clone()),
+                    None,
+                )?;
+                Ok(Some(sl))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn cmp_op(&self, opc: &str, a: &Bound<'py, PyAny>, b: &Bound<'py, PyAny>) -> Option<bool> {
+        let r: std::result::Result<bool, PyErr> = match opc {
+            "eq" => a.eq(b),
+            "ne" => a.ne(b),
+            "lt" => a.lt(b),
+            "lteq" => a.le(b),
+            "gt" => a.gt(b),
+            "gteq" => a.ge(b),
+            "in" => b.contains(a),
+            _ => b.contains(a).map(|v| !v),
+        };
+        r.ok()
+    }
+
+    /// Chained comparison fold with python's exact order: evaluate the next
+    /// operand, apply its operator, stop at the first false.
+    fn fold_cmp(
+        &self,
+        expr: &Av,
+        ops: &[Av],
+        vol: bool,
+        ae: bool,
+    ) -> ERes<Option<Bound<'py, PyAny>>> {
+        let mut cur = match self.fold(expr, vol, ae)? { Some(v) => v, None => return Ok(None) };
+        for op in ops.iter() {
+            let (on, oa) = match parts(op) {
+                Some(x) => x,
+                None => return Ok(None),
+            };
+            if on != "Operand" || oa.len() < 2 {
+                return Ok(None);
+            }
+            let rhs = match self.fold(&oa[1], vol, ae)? { Some(v) => v, None => return Ok(None) };
+            let opname = match arg_str(&oa[0]) { Some(s) => s, None => return Ok(None) };
+            let ok = match self.cmp_op(opname, &cur, &rhs) {
+                Some(v) => v,
+                None => return Ok(None),
+            };
+            if !ok {
+                return Ok(Some(false.into_bound_py_any(self.py)?));
+            }
+            cur = rhs;
+        }
+        Ok(Some(true.into_bound_py_any(self.py)?))
+    }
+
+    /// The full `_FilterTestCommon.as_const` mirror: volatile regions fold
+    /// nothing, context-dependent functions never fold, everything else folds
+    /// by *calling the function at compile time* exactly like python's code
+    /// generator does through its optimizer.
+    fn fold_filter_test(
+        &self,
+        na: &[Av],
+        is_filter: bool,
+        vol: bool,
+        ae: bool,
+    ) -> ERes<Option<Bound<'py, PyAny>>> {
+        // a filter-block target raises Impossible before even looking at the
+        // context (python's `Filter.as_const` override).
+        if matches!(&na[0], Av::NoneV) || na.len() < 6 {
+            return Ok(None);
+        }
+        if vol {
+            return Ok(None);
+        }
+        let fname = match arg_str(&na[1]) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let map = if is_filter { self.filters() } else { self.tests() };
+        let func = match map.get_item(fname)? {
+            Some(f) => f,
+            None => return Ok(None),
+        };
+        // python's `_PassArg.from_obj`: context-dependent never folds.
+        let pa_name: Option<String> = match func.getattr("jinja_pass_arg") {
+            Ok(p) => p.getattr("name")?.extract()?,
+            Err(_) => None,
+        };
+        if pa_name.as_deref() == Some("context") {
+            return Ok(None);
+        }
+        let mut vals: Vec<Bound<'py, PyAny>> = Vec::new();
+        match &na[2] {
+            Av::List(l) => {
+                for a in l {
+                    match self.fold(a, vol, ae)? {
+                        Some(v) => vals.push(v),
+                        None => return Ok(None),
+                    }
+                }
+            }
+            _ => return Ok(None),
+        }
+        let kw = PyDict::new(self.py);
+        match &na[3] {
+            Av::List(l) => {
+                for p in l {
+                    let (pn, pa) = match parts(p) {
+                        Some(x) => x,
+                        None => return Ok(None),
+                    };
+                    if pa.len() < 2 {
+                        return Ok(None);
+                    }
+                    let k = if pn == "Keyword" {
+                        match arg_str(&pa[0]) {
+                            Some(s) => self.lit(&Av::Str(s.to_string()))?,
+                            None => return Ok(None),
+                        }
+                    } else if pn == "Pair" {
+                        match self.fold(&pa[0], vol, ae)? { Some(v) => v, None => return Ok(None) }
+                    } else {
+                        return Ok(None);
+                    };
+                    let v = match self.fold(&pa[1], vol, ae)? { Some(v) => v, None => return Ok(None) };
+                    kw.set_item(&k, &v)?;
+                }
+            }
+            _ => return Ok(None),
+        }
+        // dynamic arguments fold through python's own extend/update rules.
+        if !matches!(&na[4], Av::NoneV) {
+            match self.fold(&na[4], vol, ae)? {
+                Some(d) => {
+                    #[allow(deprecated)] // `iter()` matches the rest of this file.
+                    let iter = match d.iter() { Ok(i) => i, Err(_) => return Ok(None) };
+                    for e in iter {
+                        match e {
+                            Ok(v) => vals.push(v),
+                            Err(_) => return Ok(None),
+                        }
+                    }
+                }
+                None => return Ok(None),
+            }
+        }
+        if !matches!(&na[5], Av::NoneV) {
+            match self.fold(&na[5], vol, ae)? {
+                Some(d) => {
+                    if kw.call_method1("update", (&d,)).is_err() {
+                        return Ok(None);
+                    }
+                }
+                None => return Ok(None),
+            }
+        }
+        let target = match self.fold(&na[0], vol, ae)? { Some(v) => v, None => return Ok(None) };
+        // python inserts the target first, then the pass argument in front.
+        let mut full: Vec<Bound<'py, PyAny>> = Vec::new();
+        match pa_name.as_deref() {
+            Some("eval_context") => full.push(self.evalctx()),
+            Some("environment") => full.push(self.env()),
+            _ => {}
+        }
+        full.push(target);
+        full.extend(vals);
+        let atup = PyTuple::new(self.py, &full)?;
+        self.try_fold(func.call(atup, Some(&kw)))
     }
 
     /// Join of already finalized output pieces: the compiled engine yields
@@ -1110,11 +1517,20 @@ impl<'py> Ev<'py> {
             },
             "Concat" => match &args[0] {
                 Av::List(ps) => {
+                    // python's optimizer runs on every non-volatile concat
+                    // visit regardless of the autoescape flag; folded joins use
+                    // plain str() semantics (`None` becomes 'None'), not markup.
+                    let st = *self.aestate.borrow();
+                    if !st.vol {
+                        if let Some(v) = self.fold(av, false, st.ae)? {
+                            return Ok(v);
+                        }
+                    }
                     let mut vals: Vec<Bound<PyAny>> = Vec::new();
                     for p in ps {
                         vals.push(self.node(p)?);
                     }
-                    self.concat_values(vals)
+                    self.ae_join(vals)
                 }
                 _ => Err(nope("concat parts")),
             },
@@ -1483,12 +1899,36 @@ other => Err(nope(other.to_string())),
                     Some(Av::List(l)) => l,
                     _ => return Err(nope("bad output node")),
                 };
+                // Static template data renders raw in every state: python folds
+                // it into module literals (the compile-time escape is a no-op on
+                // its Markup wrap) and even the volatile runtime path wraps it
+                // with `(Markup if autoescape else identity)` inside the outer
+                // `(escape if autoescape else str)` so nothing can escape it.
+                // Other children ARE constant-folded at compile time whenever
+                // `as_const` succeeds (finalize.const is populated even without
+                // a user finalizer!) -- escaped according to the *compile-time*
+                // attribute, not the live one; only non-foldable ones take the
+                // runtime wrappers with their per-part live checks.  In
+                // non-volatile regions both routes coincide (escape/str around
+                // an equal value), so folding there is optional; volatile
+                // regions must reproduce the compile-time fold, because their
+                // runtime attribute may disagree with it.
+                let st = *self.aestate.borrow();
                 for it in items {
                     match it {
                         Av::Node("TemplateData", _, td) => out.push(self.lit(&td[0])?),
                         _ => {
+                            if st.vol {
+                                if let Some(c) = self.fold(it, true, st.ae)? {
+                                    let esc: Bound<'py, PyAny> = if st.ae {
+                                        self.rt().getattr("escape")?.call1((&c,))?
+                                    } else { c };
+                                    out.push(esc.str()?.into_any());
+                                    continue;
+                                }
+                            }
                             let v = self.node(it)?;
-                            out.push(self.out_str(&v)?);
+                            out.push(self.out_wrap(&v)?);
                         }
                     }
                 }
@@ -1558,6 +1998,80 @@ other => Err(nope(other.to_string())),
             "Include" => self.exec_include(args, out),
             "Import" => self.exec_import(args),
             "FromImport" => self.exec_from_import(args, lineno),
+            // slice C-v6: the `{% autoescape %}` tag and its scope wrapper
+            "Scope" => {
+                if args.len() < 1 {
+                    return Err(nope("bad scope node"));
+                }
+                let body = match &args[0] {
+                    Av::List(b) => b,
+                    _ => return Err(nope("bad scope body")),
+                };
+                self.enter_body_flags();
+                let mut occs: Vec<Occ> = Vec::new();
+                for it in body {
+                    self.walk_fsf(it, &mut occs);
+                }
+                let ancestors = self.owned_union();
+                let kinds = self.build_kinds(&occs, &ancestors);
+                self.enter_scope(&kinds)?;
+                let res = self.exec_items(body, out);
+                self.pop_scope();
+                res
+            }
+            "ScopedEvalContextModifier" => {
+                if args.len() < 2 {
+                    return Err(nope("bad autoescape tag"));
+                }
+                let opts = match &args[0] {
+                    Av::List(o) => o,
+                    _ => return Err(nope("bad autoescape options")),
+                };
+                let body = match &args[1] {
+                    Av::List(b) => b,
+                    _ => return Err(nope("bad autoescape body")),
+                };
+                // generated code: `t_x = context.eval_ctx.save()`, one
+                // assignment per option keyword, the body, then revert.
+                let evalv = self.evalctx();
+                let saved = evalv.call_method0("save")?;
+                let oldst = *self.aestate.borrow();
+                let mut newst = oldst;
+                for kw in opts {
+                    let (kn, ka) = match parts(kw) {
+                        Some(x) => x,
+                        None => return Err(nope("bad autoescape keyword")),
+                    };
+                    if kn != "Keyword" || ka.len() < 2 {
+                        return Err(nope("bad autoescape keyword node"));
+                    }
+                    let key = match arg_str(&ka[0]) {
+                        Some(s) => s,
+                        None => return Err(nope("autoescape option name")),
+                    };
+                    // the runtime assignment is emitted for every keyword.
+                    let v = self.node(&ka[1])?;
+                    evalv.setattr(key, &v)?;
+                    // compile-time folding decides the region mode exactly
+                    // like python's visit_EvalContextModifier: success sets
+                    // the attribute value (truthiness decides later checks),
+                    // failure marks volatile.
+                    // python mutates its single shared compile-time context
+                    // inside the loop: later options fold against what earlier
+                    // ones left behind (volatile once any of them failed).
+                    match self.fold(&ka[1], newst.vol, newst.ae)? {
+                        Some(c) => newst.ae = c.is_truthy()?,
+                        None => newst.vol = true,
+                    }
+                }
+                *self.aestate.borrow_mut() = newst;
+                let res = self.exec_items(body, out);
+                // restore both the live eval context and the mirrored compile
+                // state exactly like the emitted revert lines.
+                evalv.call_method1("revert", (&saved,))?;
+                *self.aestate.borrow_mut() = oldst;
+                res
+            }
             _ => Err(nope(format!("{name} statement outside the subset"))),
         }
     }
@@ -1775,10 +2289,20 @@ other => Err(nope(other.to_string())),
             return Err(e);
         }
         let lst = PyList::new(self.py, &buf)?;
-        let value = self.env().call_method1("concat", (&lst,))?;
+        // the implicit filter target is `Markup(concat(buf))` when compiled
+        // under a non-volatile autoescape frame; in volatile regions the wrap
+        // sits behind a runtime check of the live attribute.
+        let mut value = self.env().call_method1("concat", (&lst,))?;
+        let st = *self.aestate.borrow();
+        let wrap = if !st.vol { st.ae } else { self.live_ae()? };
+        if wrap {
+            value = self.rt().getattr("Markup")?.call1((&value,))?;
+        }
         let applied = self.eval_filter_hole(&args[1], &value)?;
         self.pop_scope();
-        out.push(self.out_str(&applied)?);
+        // start_write/end_write append the filtered result as a raw object --
+        // no str()/escape wrapper; soft_str semantics apply at the joins.
+        out.push(applied);
         Ok(())
     }
 
@@ -1828,6 +2352,12 @@ other => Err(nope(other.to_string())),
         let mut value = self.env().call_method1("concat", (&lst,))?;
         if !matches!(&args[1], Av::NoneV) {
             value = self.eval_filter_hole(&args[1], &value)?;
+        }
+        // the stored value is `(Markup if context.eval_ctx.autoescape else
+        // identity)(...)` -- a runtime check of the live attribute, emitted
+        // unconditionally regardless of the compile-time state.
+        if self.live_ae()? {
+            value = self.rt().getattr("Markup")?.call1((&value,))?;
         }
         self.pop_scope();
         self.store_assign(&args[0], value)
@@ -1893,10 +2423,11 @@ other => Err(nope(other.to_string())),
             return Err(nope("recursive loop with test filter"));
         }
         if recursive {
+            // the root function yields the loop result as a plain object
+            // (`yield loop(xs, loop)`); no output wrapper applies.
             let v = self.node(&args[1])?;
             let res = self.run_recursive(args, v, 0)?;
-            let s = self.out_str(&res)?;
-            out.push(s);
+            out.push(res);
             return Ok(());
         }
         let (kinds, extended) = self.loop_kinds(args)?;
@@ -2046,7 +2577,16 @@ other => Err(nope(other.to_string())),
         }
         self.unregister_lc(lptr);
         let lst = PyList::new(self.py, &buf)?;
-        Ok(self.env().call_method1("concat", (&lst,))?)
+        let joined = self.env().call_method1("concat", (&lst,))?;
+        // `return_buffer_contents`: non-volatile frames wrap according to the
+        // compile-time flag; volatile regions emit a runtime check of the
+        // *live* autoescape attribute.
+        let st = *self.aestate.borrow();
+        let wrap = if !st.vol { st.ae } else { self.live_ae()? };
+        if wrap {
+            return Ok(self.rt().getattr("Markup")?.call1((&joined,))?);
+        }
+        Ok(joined)
     }
 
     /// Reject for loops whose test filter rides together with extended or
@@ -2475,6 +3015,7 @@ other => Err(nope(other.to_string())),
                 kwargs_slot: plan.accesses_kwargs,
                 varargs_slot: plan.accesses_varargs,
                 body,
+                aestate: *self.aestate.borrow(),
             },
         )?;
         let macrocls = self.rt().getattr("Macro")?;
@@ -2599,8 +3140,10 @@ other => Err(nope(other.to_string())),
         all.push(target);
         all.extend(alist);
         let tup = PyTuple::new(self.py, all)?;
+        // start_write/end_write append the raw call result into the parent
+        // buffer without any str()/escape wrapper.
         let rv = self.ctx().call_method("call", tup, Some(&kwmap))?;
-        out.push(self.out_str(&rv)?);
+        out.push(rv);
         Ok(())
     }
     // ------------------------------------------------------- slice C-v4 --
@@ -2663,26 +3206,64 @@ other => Err(nope(other.to_string())),
 
     /// Collect every `{% block %}` node below `av` (codegen's
     /// `find_all(nodes.Block)`), including blocks nested inside other bodies.
-    fn collect_blocks(&self, av: &Av, out: &mut Vec<(String, Vec<Av>, bool)>) -> Result<(), EvalErr> {
+    /// Collect block definitions in document order while tracking the code
+    /// generator's compile-time eval-context state (slice C-v6): python compiles
+    /// each block function inline during its traversal of the module, so a
+    /// `{% autoescape %}` tag preceding it leaves its mark on that wrapper.  The
+    /// scan mirrors `visit_ScopedEvalContextModifier` exactly: options fold
+    /// against the evolving shared state (success sets the attribute value's
+    /// truthiness, failure pins volatile), and save/revert restores around the
+    /// body so nothing leaks past the region.
+    fn collect_blocks(
+        &self,
+        av: &Av,
+        st: &mut AeState,
+        out: &mut Vec<(String, Vec<Av>, bool, AeState)>,
+    ) -> Result<(), EvalErr> {
         match av {
             Av::List(inner) | Av::Tuple(inner) => {
                 for a in inner {
-                    self.collect_blocks(a, out)?;
+                    self.collect_blocks(a, st, out)?;
                 }
             }
+            // the block records the state at its position before descending.
             Av::Node("Block", _, a) => {
                 let nm_opt = match a.first() { Some(x) => arg_str(x), None => None };
                 if let Some(nm) = nm_opt {
                     let req = matches!(a.get(3), Some(Av::Bool(true)));
                     if let Some(Av::List(body)) = a.get(1) {
-                        out.push((nm.to_string(), body.clone(), req));
+                        out.push((nm.to_string(), body.clone(), req, *st));
                     }
                 }
-                self.collect_blocks_children(av, out)?;
+                self.collect_blocks_children(av, st, out)?;
+            }
+            Av::Node("ScopedEvalContextModifier", _, a) => {
+                let saved = *st;
+                if let Some(Av::List(opts)) = a.first() {
+                    for kw in opts {
+                        let (kn, ka) = match parts(kw) {
+                            Some(x) => x,
+                            None => continue,
+                        };
+                        if kn != "Keyword" || ka.len() < 2 {
+                            continue;
+                        }
+                        match self.fold(&ka[1], st.vol, st.ae)? {
+                            Some(c) => st.ae = c.is_truthy()?,
+                            None => st.vol = true,
+                        }
+                    }
+                }
+                if let Some(Av::List(body)) = a.get(1) {
+                    for b in body {
+                        self.collect_blocks(b, st, out)?;
+                    }
+                }
+                *st = saved;
             }
             Av::Node(_, _, a) => {
                 for x in a {
-                    self.collect_blocks(x, out)?;
+                    self.collect_blocks(x, st, out)?;
                 }
             }
             _ => {}
@@ -2690,14 +3271,19 @@ other => Err(nope(other.to_string())),
         Ok(())
     }
 
-    fn collect_blocks_children(&self, av: &Av, out: &mut Vec<(String, Vec<Av>, bool)>) -> Result<(), EvalErr> {
+    fn collect_blocks_children(
+        &self,
+        av: &Av,
+        st: &mut AeState,
+        out: &mut Vec<(String, Vec<Av>, bool, AeState)>,
+    ) -> Result<(), EvalErr> {
         if let Av::Node(_, _, a) = av {
             for x in a {
-                self.collect_blocks(x, out)?;
+                self.collect_blocks(x, st, out)?;
             }
         } else if let Av::List(inner) | Av::Tuple(inner) = av {
             for x in inner {
-                self.collect_blocks(x, out)?;
+                self.collect_blocks(x, st, out)?;
             }
         }
         Ok(())
@@ -2751,12 +3337,16 @@ other => Err(nope(other.to_string())),
         tree: &Av,
         tname: Option<String>,
     ) -> Result<Rc<UnitInfo>, EvalErr> {
-        let mut found: Vec<(String, Vec<Av>, bool)> = Vec::new();
-        self.collect_blocks(tree, &mut found)?;
+        // Block functions are compiled *after* the whole root traversal has reverted every scoped eval-context change (python creates `Frame(eval_ctx)` from the restored shared object): their wrappers therefore follow the module-start defaults, never an in-region state.
+        let mut found: Vec<(String, Vec<Av>, bool, AeState)> = Vec::new();
+        // every module starts from the environment's static settings (python
+        // creates a fresh generator with a fresh eval context per template).
+        let mut istate = AeState { vol: false, ae: self.s.autoescape };
+        self.collect_blocks(tree, &mut istate, &mut found)?;
         let any_extends = has_node_named(tree, "Extends");
         let mut names: Vec<String> = Vec::new();
         let mut funcs: Vec<Py<PyAny>> = Vec::new();
-        for (nm, body, _req) in found {
+        for (nm, body, _req, _) in found {
             if names.iter().any(|n| n == &nm) {
                 return Err(nope(format!("block {:?} defined twice", nm)));
             }
@@ -2770,6 +3360,8 @@ other => Err(nope(other.to_string())),
                 self.py,
                 BlockFunc {
                     session: self.s.clone(),
+                    // module-start defaults for every block function.
+                    aestate: AeState { vol: false, ae: self.s.autoescape },
                     tname: tname.clone(),
                     name: nm.to_string(),
                     body,
@@ -2890,8 +3482,9 @@ other => Err(nope(other.to_string())),
         }
         let Some(name) = arg_str(&args[0]) else { return Err(nope("block name")) };
         if !self.ext_stack.borrow().is_empty() {
+            // python only consults the codegen flags while the frame chain is still toplevel: inner frames (scopes, loops...) keep their own silent block invocations.
             let f = *self.flags.borrow();
-            if f.known_top {
+            if f.chain_top && f.known_top {
                 return Ok(());
             }
             if f.chain_top && f.seen_any {
@@ -2963,7 +3556,14 @@ other => Err(nope(other.to_string())),
     fn exec_unit(&self, unit: &Rc<UnitInfo>, out: &mut Vec<Bound<'py, PyAny>>) -> ERes<()> {
         let saved = self.tname.borrow().clone();
         *self.tname.borrow_mut() = unit.name.clone();
+        // every template module is compiled by its own code generator with a
+        // fresh eval context of the environment's static settings; rendering a
+        // parent (or nested) unit therefore starts from that state, not from
+        // whatever region the caller interpreter happens to be in.
+        let saved_ae = *self.aestate.borrow();
+        *self.aestate.borrow_mut() = AeState { vol: false, ae: self.s.autoescape };
         let res = self.exec_unit_inner(unit, out);
+        *self.aestate.borrow_mut() = saved_ae;
         *self.tname.borrow_mut() = saved;
         res
     }
@@ -3357,6 +3957,10 @@ fn has_node_named(av: &Av, want: &str) -> bool {
 #[pyclass(unsendable)]
 pub struct BlockFunc {
     session: Rc<Session>,
+    /// Compile-time eval-context state at this block's tree position, recorded
+    /// by the mode scan over its module (slice C-v6): python compiles each
+    /// block function inline during the generator traversal of that module.
+    aestate: AeState,
     name: String,
     /// The template module this block function was compiled into (slice C-v5).
     tname: Option<String>,
@@ -3378,6 +3982,7 @@ impl BlockFunc {
             self.session.clone(),
             context.clone().unbind(),
             self.tname.clone(),
+            self.aestate,
         );
         let mut occs: Vec<Occ> = Vec::new();
         for it in &self.body {

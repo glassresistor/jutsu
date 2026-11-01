@@ -55,7 +55,9 @@ criterion.
 * [ ] `runtime.rs` mirrors of: Context/EvalContext/LoopContext/Macro/Namespace/
       Undefined (subclasses: ChainableUndefined/FastUndefined), missing sentinel,
       output buffering (`concat`, markup_join, str_join)
-* [ ] autoescape semantics + `Markup` integration via markupsafe objects
+* [x] autoescape semantics + `Markup` integration via markupsafe objects
+      (slice C-v6): compile-time eval-context state, volatile regions and the
+      constant-fold graph live in the evaluator.
 * [ ] async environments (`enable_async`) fall back unconditionally (found
       while validating C-v3b): even the synchronous `render` path awaits
       coroutines and consumes async iterables, so serving them needs the
@@ -140,7 +142,8 @@ criterion.
       (`scripts/macro_fuzz.py`, fallback census in `scripts/macro_fb.py`):
       zero mismatches, and the only fallback reasons in the whole corpus are
       the two codegen SyntaxError classes above.
-* [ ] `with`/autoescape scope modifiers via ScopedEvalContextModifier
+* [x] `with`/autoescape scope modifiers via ScopedEvalContextModifier
+      (slice C-v6).
 * [ ] performance pass: avoid pyo3 round-trips for hot attribute lookups where
       safe; measure against python-compiled baseline and only keep wins.
       Baseline measured after slice C-v1 (simple `{{ a ~ b }}`, 2000 iterations,
