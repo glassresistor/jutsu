@@ -188,15 +188,47 @@ criterion.
 ## Phase D -- extensions & ecosystem compatibility
 Split into independently scoped packages for parallel execution; see
 PLAN_D_PARALLEL.md for file ownership, conflict matrix and waves.
-* [ ] D1 extension gating & fallback correctness: loopcontrols / do /
+* [x] D1 extension gating & fallback correctness: loopcontrols / do /
       i18n / debug environments render exactly as upstream jinja does; the
       documented rule (extension contributes tags/filter_stream/preprocess
       => python parse+codegen) holds end-to-end including the wired render
       path; no-tags extensions stay rust-eligible.  Dispatch after C-v8a.
-* [ ] D2 third-party extension compatibility & API story: synthetic
+      Landed in tests/test_ext_rust.py (23 tests, new files only): per-
+      extension upstream differentials incl. installed translations and
+      plural forms; instrumented parser-selection for all eight environment
+      shapes; extraction probes through the python parse path; the
+      C-v8a `rust_eval.eligible` predicate asserted read-only (extensions,
+      async, sandbox, native exclusion, flag-off behavior, per-environment
+      verdicts).  Forked tests/test_ext.py green unchanged under default and
+      JUTSU_RUST_EVAL=1; zero src edits.
+* [x] D2 third-party extension compatibility & API story: synthetic
       third-party extension built and tested end-to-end; recorded decision
       memo on import paths and whether an api shim is needed (new files
-      only).  Dispatch immediately.
+      only).  Dispatch immediately.  Landed in tests/test_ext_thirdparty.py
+      plus the extpkg fixture package and docs/EXT_COMPAT.md (14 tests, new
+      files only): decisions recorded -- extensions must subclass
+      jutsu.ext.Extension; code importing real jinja2 keeps upstream's
+      engine; NO jutsu.ext.api shim needed (measured API surface identical:
+      attr/bind/call_method/filter_stream/parse/preprocess/priority/tags);
+      the jinja2-named alias package deferred to the Phase-F drop-in
+      experiment.  Measured hazard: registration is duck-typed so an
+      upstream-based extension is silently accepted into a jutsu environment
+      and renders through a mixed AST (jinja2.nodes.Call over jutsu.nodes.Const) -- documented as an unsupported latent dependency, not a feature.
+* [ ] D1/D2 follow-up for the integration owner (found while testing the
+      wired render path): with JUTSU_RUST_EVAL=1 seven suite tests fail in
+      files that use no extensions at all.  test_core_tags
+      TestForLoop::test_cycling and test_lexnparse TestSyntax::test_call
+      raise `RuntimeError: served template declined: 'dynamic call
+      arguments'` -- a compile-time serve verdict disagrees with the
+      per-render scan; the test_regression pass_context trio,
+      test_tests::test_multiple_tests and test_debug::test_runtime_error are
+      output/traceback divergences from rust serving.  All sit inside
+      PLAN_C_DONE.md's scope (R1 decline path, error paths recorded not
+      chased), not D1's; the extension suites pass under both settings.
+* [ ] D2 follow-up: decide whether registration should reject non-jutsu
+      Extension subclasses instead of duck-accepting them -- today a mixed-
+      AST render works purely by structural coincidence, so nothing guards
+      against silent breakage if either package's node internals diverge.
 * [ ] D3 loaders & bytecache pure-python audit: every loader class plus
       BytecodeCache proven working with rust engines default-on; profiling
       memo justifying pure-python status.  Dispatch immediately.

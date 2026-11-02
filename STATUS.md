@@ -452,3 +452,63 @@ Remaining Phase-C slices: C-v8a (wire evaluator into `Template.render`
 behind `JUTSU_RUST_EVAL`), C-v8b (cross-template serving), C-v8c (measure
 & flip default); optional polish C-v9.  Phase D is split into four
 parallel packages D1-D4 plus backlog D5 -- see PLAN_D_PARALLEL.md.
+
+## Settled behavior: the extension fallback rule (Phase D, package D1)
+
+The rule an ecosystem can rely on, now enforced end-to-end and covered by
+tests/test_ext_rust.py:
+
+* **Any extension contributing parse tags, `filter_stream` or `preprocess`
+  forces the python parse+codegen path** -- and therefore never rust serving.
+  All four shipped extensions do exactly that (`loopcontrols` contributes
+  `break`/`continue`, `do` contributes `do`, `i18n` contributes `trans`,
+  `debug` contributes `debug`), so they are always python-parsed and python-
+  compiled.  The predicate is the same one the parser has used since
+  PLAN_PARSER.md (`_extensions_contribute`) and, after C-v8a, the serve-side
+  predicate `rust_eval.eligible` reuses it.
+* **Pure runtime extensions -- filters and tests only -- stay rust-eligible.**
+  Filters and tests resolve through the real python `Context`, so nothing
+  needs parse-time help; a no-tags extension renders identically through the
+  python engine and through the rust evaluator, and keeps selecting the rust
+  parser.
+* **Every shipped extension renders exactly as upstream jinja does.**  Each
+  one was diffed against Jinja2 3.1.6 installed alongside this fork:
+  loopcontrols and `do` match byte-for-byte; `debug` matches once the two
+  unavoidable differences are normalized (the package prefix inside class
+  reprs, and object addresses); i18n matches with translations installed,
+  including plural forms -- and, shared with upstream, the trans block's
+  literal singular/plural strings are *not* looked up in the mapping (only
+  gettext callables are), while oldstyle ngettext returns the translated
+  format string without substituting the count.
+* **Error paths decline cleanly rather than guessing.**  The rust evaluator
+  has no extension machinery, so extension syntax is a parse failure there;
+  verified byte-identical to what python's own parser reports for the same
+  source without the extension (`Encountered unknown tag 'break' ...`), which
+  is exactly the decline R1 asks for.
+* **i18n extraction keeps working through the python parse path.**
+  `extract_from_ast`, `babel_extract` and `Environment.extract_translations`
+  all verified; instrumented runs confirm that with i18n loaded the parse is
+  python, so trans nodes exist for extraction to find.  (Plain environments
+  may extract from a rust-parsed tree -- both produce equivalent ASTs.)
+* **The C-v8a serve predicate matches the rule** and adds its own conditions:
+  async, sandboxed and native value environments are never eligible, and
+  nothing is eligible while `JUTSU_RUST_EVAL` is off.  Verdicts are per-
+  environment-shape: two environments with different extension sets get
+  independent answers (the B2 two-environment probe rule).
+
+Validation for D1/D2 together: full python suite green at 1036 passed with
+default engines; the three extension suites (test_ext.py forked unchanged,
+test_ext_rust.py, test_ext_thirdparty.py) green under both default and
+`JUTSU_RUST_EVAL=1`; cargo tests unchanged at 17; zero edits to existing src
+files by either package.
+
+Third-party extension compatibility is settled in docs/EXT_COMPAT.md: the
+extension API surface measured identical to upstream (eight public members),
+so no `jutsu.ext.api` shim is needed; extensions must subclass
+`jutsu.ext.Extension`; code that keeps importing real `jinja2` gets
+upstream's independent engine, with a documented hazard -- registration is
+duck-typed, so such an extension is silently accepted into a jutsu
+environment and renders through a mixed AST (jinja2.nodes.Call carrying
+jutsu.nodes.Const children) purely by structural coincidence.  The
+`jinja2`-named alias package question stays deferred to the Phase-F drop-in
+experiment.
