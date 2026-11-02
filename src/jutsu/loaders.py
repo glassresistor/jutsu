@@ -145,7 +145,7 @@ class BaseLoader:
             bcc.set_bucket(bucket)
 
         return environment.template_class.from_code(
-            environment, code, globals, uptodate
+            environment, code, globals, uptodate, source
         )
 
 

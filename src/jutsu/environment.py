@@ -64,6 +64,10 @@ if t.TYPE_CHECKING:
 
 _env_bound = t.TypeVar("_env_bound", bound="Environment")
 
+# Sentinel distinguishing "no source passed to from_code" from a genuine
+# ``None`` source value; only set onto the template when a real source is given.
+missing_source = object()
+
 
 # for direct template usage we have up to ten living environments
 @lru_cache(maxsize=10)
@@ -1105,7 +1109,8 @@ class Environment:
         """
         gs = self.make_globals(globals)
         cls = template_class or self.template_class
-        return cls.from_code(self, self.compile(source), gs, None)
+        src = source if isinstance(source, str) else None
+        return cls.from_code(self, self.compile(source), gs, None, src)
 
     def make_globals(
         self, d: t.MutableMapping[str, t.Any] | None
@@ -1128,6 +1133,37 @@ class Environment:
             d = {}
 
         return ChainMap(d, self.globals)
+
+
+def _rust_serve_decide(template: "Template", ctx: Context) -> bool:
+    """Is ``template`` served from the rust evaluator?
+
+    The verdict is decided once -- on the first render that finds it
+    undecided -- and cached on the template object forever (slice C-v8a).
+    Deciding runs only rust's compile-time analyses against a real context,
+    never executing, so no filter side effect can fire during the probe.
+    Ineligible or refused templates become python-served permanently: a
+    verdict flip must never depend on mid-render state.  When serving is
+    inactive (the ``JUTSU_RUST_EVAL`` flag off) every template stays
+    python-served, which is the default until C-v8c flips it.
+    """
+    cached = getattr(template, "_rust_serve", None)
+    if cached is not None:
+        return cached
+    from . import rust_eval
+
+    if not rust_eval.has_rust_core() or not rust_eval.eligible(template.environment):
+        template._rust_serve = False
+        return False
+    supported, _reason = rust_eval.serve_verdict(template, ctx)
+    template._rust_serve = bool(supported)
+    return template._rust_serve
+
+
+def _rust_eval_serve(template: "Template", ctx: Context) -> str:
+    from . import rust_eval
+
+    return rust_eval.render_served(template, ctx)
 
 
 class Template:
@@ -1160,6 +1196,13 @@ class Template:
     _module: t.Optional["TemplateModule"]
     _debug_info: str
     _uptodate: t.Callable[[], bool] | None
+    #: Original template source, captured at compile time for the rust
+    #: evaluator's serve decision (slice C-v8a).  ``None`` when the source
+    #: was not retained (e.g. loaded from a precompiled bytecache).
+    source: t.Optional[str] = None
+    #: Cached serve verdict of :func:`_rust_serve_decide`: ``None`` undecided,
+    #: ``True`` served from rust, ``False`` python-served forever.
+    _rust_serve: bool | None = None
 
     def __new__(
         cls,
@@ -1217,6 +1260,7 @@ class Template:
         code: CodeType,
         globals: t.MutableMapping[str, t.Any],
         uptodate: t.Callable[[], bool] | None = None,
+        source: t.Optional[str] = missing_source,
     ) -> "Template":
         """Creates a template object from compiled code and the globals.  This
         is used by the loaders and environment to create a template object.
@@ -1225,6 +1269,8 @@ class Template:
         exec(code, namespace)
         rv = cls._from_namespace(environment, namespace, globals)
         rv._uptodate = uptodate
+        if source is not missing_source:
+            rv.source = source
         return rv
 
     @classmethod
@@ -1285,6 +1331,12 @@ class Template:
             return asyncio.run(self.render_async(*args, **kwargs))
 
         ctx = self.new_context(dict(*args, **kwargs))
+
+        if _rust_serve_decide(self, ctx):
+            try:
+                return _rust_eval_serve(self, ctx)
+            except Exception:
+                self.environment.handle_exception()
 
         try:
             return self.environment.concat(self.root_render_func(ctx))  # type: ignore

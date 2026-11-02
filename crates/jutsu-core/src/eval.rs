@@ -2681,6 +2681,22 @@ other => Err(nope(other.to_string())),
                         }
                     }
                 }
+                // Dynamic call / filter / test arguments (`*a` / `**k`) are
+                // rejected at scan time, not only at evaluation: a template
+                // whose verdict was cached as "supported" must never decline
+                // part-way through a render (the never-guess invariant), so
+                // every exec-time unsupported path has to be caught by the
+                // scan too.  These remain correct via the python fallback.
+                if *name == "Call" && args.len() >= 5 {
+                    if !matches!(&args[3], Av::NoneV) || !matches!(&args[4], Av::NoneV) {
+                        return Err(nope("dynamic call arguments"));
+                    }
+                }
+                if (*name == "Filter" || *name == "Test") && args.len() >= 6 {
+                    if !matches!(&args[4], Av::NoneV) || !matches!(&args[5], Av::NoneV) {
+                        return Err(nope("dynamic filter/test arguments"));
+                    }
+                }
                 // python's codegen writes keyword arguments into generated
                 // source, so a duplicated key makes CPython fail with
                 // `SyntaxError: keyword argument repeated` whose message
@@ -4141,3 +4157,54 @@ pub fn evaluate_with_sources<'py>(
         Err(EvalErr::Unsupported(u)) => EvalOutcome::Unsupported(u),
     }
 }
+
+/// Outcome of the C-v8a serve decision: whether a template may be served from
+/// rust, and if not, why.  `Supported` means the whole-tree scan and layout
+/// checks pass *and* the template reaches no other template (no extends,
+/// include or import nodes), which is what makes the verdict side-effect-free:
+/// with no cross-template references, evaluation cannot decline part-way
+/// through a render (slice C-v5's lookups are the only mid-exec unsupported
+/// sources), so a cached per-template verdict never lies.  Closing that gap --
+/// serving referenced templates from rust too -- is slice C-v8b.
+pub enum ServeVerdict {
+    Supported,
+    Refused(String),
+}
+
+/// Decide whether ``av`` may be served from rust against a live context, by
+/// running only the compile-time analyses (never executing).  A parse outcome
+/// that is itself an error counts as refused: the caller falls back to python
+/// codegen, which surfaces the real exception.
+pub fn check_supported<'py>(
+    py: Python<'py>,
+    av: &Av,
+    ctx: Bound<'py, PyAny>,
+    rt: Bound<'py, PyAny>,
+    name: Option<String>,
+) -> ServeVerdict {
+    let ev = match Ev::new(py, ctx, rt, name, Default::default()) {
+        Ok(e) => e,
+        Err(EvalErr::Exc(_)) => return ServeVerdict::Refused("environment guards".into()),
+        Err(EvalErr::Unsupported(u)) => return ServeVerdict::Refused(u),
+    };
+    if let Err(e) = ev.scan(av) {
+        return match e {
+            EvalErr::Unsupported(u) => ServeVerdict::Refused(u),
+            EvalErr::Exc(_) => ServeVerdict::Refused("analysis error".into()),
+        };
+    }
+    if let Err(e) = ev.check_layout(av, true) {
+        return match e {
+            EvalErr::Unsupported(u) => ServeVerdict::Refused(u),
+            EvalErr::Exc(_) => ServeVerdict::Refused("analysis error".into()),
+        };
+    }
+    for want in ["Extends", "Include", "Import", "FromImport"] {
+        if has_node_named(av, want) {
+            return ServeVerdict::Refused(format!("{want} node (cross-template)").into());
+        }
+    }
+    ServeVerdict::Supported
+}
+
+

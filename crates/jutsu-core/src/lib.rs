@@ -363,6 +363,54 @@ fn parse<'py>(
     }
 }
 
+/// Decide whether a parsed template may be served from rust against a live
+/// context, running only the compile-time analyses (never executing).  Returns
+/// `(supported, reason)`.  See `eval::check_supported` -- slice C-v8a.
+#[pyfunction]
+#[pyo3(signature = (ast, ctx, rt, name = None))]
+fn check_supported<'py>(
+    py: Python<'py>,
+    ast: &ParsedAst,
+    ctx: Py<PyAny>,
+    rt: Py<PyAny>,
+    name: Option<String>,
+) -> PyResult<Bound<'py, PyTuple>> {
+    match &ast.outcome {
+        AstOutcome::Ok(av) => {
+            let verdict = eval::check_supported(
+                py,
+                av,
+                ctx.bind(py).clone(),
+                rt.bind(py).clone(),
+                name,
+            );
+            let (ok, reason): (bool, Option<String>) = match verdict {
+                eval::ServeVerdict::Supported => (true, None),
+                eval::ServeVerdict::Refused(r) => (false, Some(r)),
+            };
+            Ok(PyTuple::new(
+                py,
+                [
+                    ok.into_bound_py_any(py)?,
+                    match reason {
+                        Some(r) => r.into_bound_py_any(py)?,
+                        None => py.None().into_bound(py).into_any(),
+                    },
+                ],
+            )?)
+        }
+        // A stored parse failure means the template cannot even be evaluated:
+        // refuse service and let python codegen raise the real error.
+        AstOutcome::LexErr(_) | AstOutcome::PErr(_) => Ok(PyTuple::new(
+            py,
+            [
+                false.into_bound_py_any(py)?,
+                "parse error".into_bound_py_any(py)?,
+            ],
+        )?),
+    }
+}
+
 #[pyfunction]
 fn ping() -> PyResult<String> {
     Ok("pong".to_string())
@@ -376,6 +424,7 @@ fn _jutsu(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(eval_template, m)?)?;
     m.add_function(wrap_pyfunction!(compile_ast, m)?)?;
     m.add_function(wrap_pyfunction!(eval_parsed, m)?)?;
+    m.add_function(wrap_pyfunction!(check_supported, m)?)?;
     m.add_class::<ParsedAst>()?;
     m.add_class::<eval::MacroFunc>()?;
     Ok(())
