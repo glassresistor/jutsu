@@ -398,3 +398,29 @@ unchanged at 17.
 
 Slice C-v6 -- autoescape and volatile regions.  The code generator's compile-time evaluation context is now mirrored per region next to the live one, so constant folding (including python's non-markup-aware `Concat.as_const`), wrapper choice and markup joins follow the generated engine exactly; `{% autoescape %}` tags with foldable options fix wrappers at entry while volatile regions consult the live attribute per part.  Block functions compile from module-start defaults because python emits them after every scoped tag reverted, which also exposed a latent bug: silent block invocations nested inside scope tags after a known top-level extend were dropped wholesale instead of only while the frame chain stays toplevel (python renders such overrides twice -- once through the inheritance chain and once at their position).  Call blocks, filter blocks and recursion levels push raw objects into the caller buffer.  Fixed suites plus new autoescape parity and inheritance probes green; statement seed 1 x8k rerun ok=1343 exc=6576 fb=81 zero diffs, include/macro/block corpora rerun zero mismatches, suite at 994 tests, cargo test still 17.  Remaining deferred: parent-side error parity instead of fallback, async environments falling out wholesale,
 and the performance pass.
+
+
+Slice C-v7a -- performance pass part 1: per-source parsed AST cache in the
+rust evaluator.  The core gained split entry points: compile_ast keeps a parse
+outcome alive (the tree itself or a deterministic lexer/parse failure) as a
+handle object, and eval_parsed evaluates such a handle with exactly the same
+result tuples as the single-shot path, including re-raising stored lexer errors
+with their original python arguments.  The driver caches handles keyed by the
+lexer-settings tuple plus source, template name and filename -- names belong to
+the key because wrapped lexer-error arguments bake them in at compile time;
+failures cache too since they are deterministic for a key.  Handles live in an
+LRU bounded at 1024 entries; cores without the split entry points keep working
+through the old single-shot function untouched.  Benchmarks (scripts/
+bench_perf.py, N=3000): expression template -- rust cold unique-source eval
+29.7 us vs python cold parse+compile+render 235.8 us (~8x win), python warm
+cached render 5.2 us vs rust warm cached-AST eval 10.0; statement template --
+rust cold 143.5 vs python cold 769.8 (~5x win), python warm 6.3 vs rust warm
+20.3, so caching costs about a seventh of the cold path but compiled execution
+still wins for warm renders and the default stays unflipped.  Validation: five
+new cache tests (hit-skips-lexing, lexerr reproducibility incl. per-name keys,
+lexer-settings isolation, eviction roundtrip, cached unsupported reasons); all
+corpora rerun with identical counts to before at zero mismatches; full suite
+999 passed with the cache active, cargo test still 17.  Remaining deferred:
+parent-side error parity instead of fallback, async environments falling out
+wholesale, and the rest of the performance pass (cutting per-node pyo3 round-
+trips toward warm-rust parity).

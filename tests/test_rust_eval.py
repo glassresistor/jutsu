@@ -1302,3 +1302,93 @@ def test_include_join_paths():
     assert "b-DREL:3" in p2[1] and "TOPREL" not in p2[1], p2
     p3, _ = check_join("sub/deep")
     assert "SREL:3" in p3[1] and "DREL:3" in p3[1], p3
+
+
+
+
+# --- performance pass: per-source parsed AST cache ------------------------
+
+
+def _lex_counter(monkeypatch):
+    """Count real lexings while routing through the untouched function."""
+    import jutsu.rust_parse as rust_parse_module
+
+    real = rust_parse_module.wrapped_tokens
+    counter = {"n": 0}
+
+    def spy(*args, **kwargs):
+        counter["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(rust_eval, "wrapped_tokens", spy)
+    return counter
+
+
+def test_ast_cache_hit_skips_lexing(monkeypatch):
+    counter = _lex_counter(monkeypatch)
+    env = Environment()
+    src = "{% for i in [1, 2] %}{{ i }}{% endfor %}"
+    first = rust_eval.evaluate(env, src)
+    second = rust_eval.evaluate(env, src)
+    assert first == second == "12"
+    assert counter["n"] == 1, f"cache miss on repeat: {counter['n']} lexes"
+
+
+def test_ast_cache_reproduces_lexerr(monkeypatch):
+    counter = _lex_counter(monkeypatch)
+    env = Environment()
+    for src in ("{{ x ", "{% if y "):
+        for name in ("t1", "t2"):
+            errs = []
+            for _ in range(3):  # compile once, re-raise twice from cache
+                try:
+                    rust_eval.evaluate(env, src, name=name)
+                except Exception as exc:  # noqa: BLE001
+                    errs.append(exc)
+            assert len(errs) == 3
+            assert all(type(e) is type(errs[0]) for e in errs)
+            facts = {(type(e).__name__, str(e), e.lineno) for e in errs}
+            assert len(facts) == 1, f"diverging re-raises for {src!r}: {facts}"
+            assert all(e.name == name for e in errs)
+    assert counter["n"] == 4, f"expected one lex per (src,name), got {counter['n']}"
+
+
+def test_ast_cache_isolates_lexer_settings():
+    env_a = Environment()
+    env_b = Environment(
+        variable_start_string="<<", variable_end_string=">>",
+        block_start_string="<%", block_end_string="%>",
+        comment_start_string="<#", comment_end_string="#>",
+    )
+    src = "<< x >>"  # prints under B settings, is literal text under A ones
+    for _ in range(2):
+        assert rust_eval.evaluate(env_a, src) == "<< x >>"
+        assert rust_eval.evaluate(env_b, src, variables={"x": "V"}) == "V"
+
+
+def test_ast_cache_eviction_roundtrip(monkeypatch):
+    monkeypatch.setattr(rust_eval, "_MAX_CACHED_TEMPLATES", 2)
+    saved = list(rust_eval._AST_CACHE.items())
+    rust_eval._AST_CACHE.clear()
+    try:
+        env = Environment()
+        want = {"a{{ 1 }}": "a1", "b{{ 2 }}": "b2", "c{{ 3 }}": "c3"}
+        for src, exp in want.items():
+            assert rust_eval.evaluate(env, src) == exp
+        assert len(rust_eval._AST_CACHE) == 2
+        # the evicted head re-compiles on demand with identical results:
+        assert rust_eval.evaluate(env, "a{{ 1 }}") == "a1"
+    finally:
+        rust_eval._AST_CACHE.clear()
+        for k, v in saved:
+            rust_eval._AST_CACHE[k] = v
+
+
+def test_ast_cache_caches_unsupported_reasons():
+    env = Environment()
+    # filtered extended loops are rejected at scan time (slice C-v4b):
+    src = "{% for i in x if i %}{{ loop.nextitem }}{% endfor %}"
+    r1 = rust_eval.evaluate(env, src, variables={"x": [1]}, with_reason=True)
+    r2 = rust_eval.evaluate(env, src, variables={"x": [1]}, with_reason=True)
+    assert r1 is not None and r1[0] is None, f"{r1!r}"
+    assert r2 == r1, f"{r2!r} != {r1!r}"

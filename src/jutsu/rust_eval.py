@@ -13,6 +13,8 @@ try:  # optional rust core (built via maturin / cargo)
 except ImportError:  # pragma: no cover - pure python installs
     _jutsu = None
 
+from collections import OrderedDict
+
 from . import runtime as _runtime
 from .exceptions import TemplateAssertionError, TemplateSyntaxError
 from .rust_parse import wrapped_tokens
@@ -45,6 +47,54 @@ def prepare_sources(environment, templates):
     return out
 
 
+def _lexer_key(environment):
+    """The lexer-cache key from `jutsu.lexer.get_lexer`: everything that can
+    shape tokenization of a source (delimiters and strip flags)."""
+    return (
+        environment.block_start_string,
+        environment.block_end_string,
+        environment.variable_start_string,
+        environment.variable_end_string,
+        environment.comment_start_string,
+        environment.comment_end_string,
+        environment.line_statement_prefix,
+        environment.line_comment_prefix,
+        environment.trim_blocks,
+        environment.lstrip_blocks,
+        environment.newline_sequence,
+        environment.keep_trailing_newline,
+    )
+
+
+_MAX_CACHED_TEMPLATES = 1024
+
+_AST_CACHE: "OrderedDict[tuple, object]" = OrderedDict()
+
+
+def _cached_compile(environment, source, name, filename):
+    """Parse ``source`` into a cached rust AST handle (performance pass).
+
+    Returns ``None`` when the loaded core predates the split entry points so
+    callers can keep using the cold tokenize+parse+evaluate function.  Parse
+    failures are cached as well -- they are deterministic for a key, and the
+    stored lexer-error arguments carry the *name* and *filename* baked in at
+    wrap time, which is why those belong to the cache key too.
+    """
+    if _jutsu is None or not hasattr(_jutsu, "compile_ast"):
+        return None
+    key = _lexer_key(environment) + (source, name, filename)
+    ast = _AST_CACHE.get(key)
+    if ast is not None:
+        _AST_CACHE.move_to_end(key)
+        return ast
+    toks, lexerr = wrapped_tokens(environment, source, name, filename)
+    ast = _jutsu.compile_ast(toks, lexerr)
+    _AST_CACHE[key] = ast
+    while len(_AST_CACHE) > _MAX_CACHED_TEMPLATES:
+        _AST_CACHE.popitem(last=False)
+    return ast
+
+
 def evaluate(environment, source, name=None, filename=None, variables=None,
             templates=None, with_reason=False):
     """Render ``source`` with the rust evaluator.
@@ -54,11 +104,19 @@ def evaluate(environment, source, name=None, filename=None, variables=None,
     exceptions and runtime errors propagate untouched.  ``templates`` maps
     extra template names to their sources so that `{% extends %}` can be
     followed inside rust without going through python's loaders.
+
+    Repeated renders of one source skip lexing and parsing entirely via the
+    cached handle from :func:`_cached_compile`; older cores fall back to the
+    single-shot entry point transparently.
     """
-    toks, lexerr = wrapped_tokens(environment, source, name, filename)
+    ast = _cached_compile(environment, source, name, filename)
     ctx = make_context(environment, variables, name)
     srcs = prepare_sources(environment, templates)
-    res = _jutsu.eval_template(toks, lexerr, ctx, _runtime, name, srcs)
+    if ast is not None:
+        res = _jutsu.eval_parsed(ast, ctx, _runtime, name, srcs)
+    else:
+        toks, lexerr = wrapped_tokens(environment, source, name, filename)
+        res = _jutsu.eval_template(toks, lexerr, ctx, _runtime, name, srcs)
     kind = res[0]
     if kind == "__okrender__":
         return res[1]

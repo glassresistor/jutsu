@@ -121,7 +121,7 @@ fn to_ptokens(py: Python<'_>, tokens: &[(u32, String, Py<PyAny>)]) -> Vec<PToken
 /// Encode a parse error as the tuple forms documented in ast_rebuild.py.
 fn err_tuple<'py>(
     py: Python<'py>,
-    e: parser::ParseErr,
+    e: &parser::ParseErr,
 ) -> PyResult<Bound<'py, PyAny>> {
     if let Some(stored) = &e.lexerr {
         let items: Vec<Bound<'py, PyAny>> = vec![
@@ -132,7 +132,7 @@ fn err_tuple<'py>(
     }
     let items: Vec<Bound<'py, PyAny>> = vec![
         "__perr__".into_bound_py_any(py)?,
-        e.message.into_bound_py_any(py)?,
+        e.message.as_str().into_bound_py_any(py)?,
         match e.lineno {
             Some(l) => l.into_bound_py_any(py)?,
             None => Option::<String>::None.into_bound_py_any(py)?,
@@ -163,45 +163,113 @@ fn eval_template<'py>(
     let ptoks = to_ptokens(py, &tokens);
     let mut rp = RtParser::new(ptoks, lexerr.map(Arc::new));
     match rp.parse() {
-        Ok(av) => {
-            let srcs: std::collections::HashMap<String, Option<Vec<PToken>>> = match sources {
-                Some(map) => map
-                    .into_iter()
-                    .map(|(k, v)| {
-                        (
-                            k,
-                            match v {
-                                Some(toks) => Some(to_ptokens(py, &toks)),
-                                None => None,
-                            },
-                        )
-                    })
-                    .collect(),
-                None => Default::default(),
-            };
-            let (cbox, rtbox) = match (ctx, rt) {
-                (Some(c), Some(r)) => (c.bind(py).clone(), r.bind(py).clone()),
-                _ => {
-                    return Err(pyo3::exceptions::PyTypeError::new_err(
-                        "eval_template needs a context and the runtime module",
-                    ))
-                }
-            };
-            match eval::evaluate_with_sources(py, &av, cbox, rtbox, name, srcs) {
-                eval::EvalOutcome::Rendered(v) => {
-                    let items: Vec<Bound<'py, PyAny>> = vec![
-                        "__okrender__".into_bound_py_any(py)?,
-                        v,
-                    ];
-                    Ok(PyTuple::new(py, items)?.into_any())
-                }
-                eval::EvalOutcome::Unsupported(n) => {
-                    Ok(("__unsupported__", n).into_bound_py_any(py)?.into_any())
-                }
-                eval::EvalOutcome::Exc(e) => Err(e),
-            }
+        Ok(av) => render_av(py, &av, ctx, rt, name, sources),
+        Err(e) => err_tuple(py, &e),
+    }
+}
+
+/// Evaluate an already-parsed AST against a live context: the tail of
+/// `eval_template` shared with the cached entry point below.
+fn render_av<'py>(
+    py: Python<'py>,
+    av: &Av,
+    ctx: Option<Py<PyAny>>,
+    rt: Option<Py<PyAny>>,
+    name: Option<String>,
+    sources: Option<std::collections::HashMap<String, Option<Vec<(u32, String, Py<PyAny>)>>>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let srcs: std::collections::HashMap<String, Option<Vec<PToken>>> = match sources {
+        Some(map) => map
+            .into_iter()
+            .map(|(k, v)| (
+                k,
+                match v {
+                    Some(toks) => Some(to_ptokens(py, &toks)),
+                    None => None,
+                },
+            ))
+            .collect(),
+        None => Default::default(),
+    };
+    let (cbox, rtbox) = match (ctx, rt) {
+        (Some(c), Some(r)) => (c.bind(py).clone(), r.bind(py).clone()),
+        _ => {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "eval needs a context and the runtime module",
+            ))
         }
-        Err(e) => err_tuple(py, e),
+    };
+    match eval::evaluate_with_sources(py, av, cbox, rtbox, name, srcs) {
+        eval::EvalOutcome::Rendered(v) => {
+            let items: Vec<Bound<'py, PyAny>> = vec![
+                "__okrender__".into_bound_py_any(py)?,
+                v,
+            ];
+            Ok(PyTuple::new(py, items)?.into_any())
+        }
+        eval::EvalOutcome::Unsupported(n) => {
+            Ok(("__unsupported__", n).into_bound_py_any(py)?.into_any())
+        }
+        eval::EvalOutcome::Exc(e) => Err(e),
+    }
+}
+
+/// What a cached compile call remembers: the parsed tree or the deterministic
+/// parse failure instead of it.
+enum AstOutcome {
+    Ok(Av),
+    LexErr(parser::ParseErr),
+    PErr(parser::ParseErr),
+}
+
+/// A template parsed once for repeated evaluation (performance pass, see
+/// PLAN_INTERP.md).  The python driver caches these handles per source and
+/// lexer settings; `eval_parsed` then reproduces exactly what a fresh
+/// tokenize+parse+evaluate would have returned -- including re-raising stored
+/// lexer errors with their original python arguments -- so cached and cold
+/// paths are indistinguishable.  Evaluation never mutates the tree (the
+/// interpreter takes it by reference), which is what makes sharing safe.
+#[pyclass(unsendable)]
+pub struct ParsedAst {
+    outcome: AstOutcome,
+}
+
+/// Parse a wrapped token stream and keep the result alive for reuse.  Unlike
+/// `parse` this never serializes the tree to python tuples; errors are stored
+/// rather than returned, so the call itself cannot fail.
+#[pyfunction]
+#[pyo3(signature = (tokens, lexerr = None))]
+fn compile_ast<'py>(
+    py: Python<'py>,
+    tokens: Vec<(u32, String, Py<PyAny>)>,
+    lexerr: Option<Py<PyAny>>,
+) -> ParsedAst {
+    let ptoks = to_ptokens(py, &tokens);
+    let mut rp = RtParser::new(ptoks, lexerr.map(Arc::new));
+    match rp.parse() {
+        Ok(av) => ParsedAst { outcome: AstOutcome::Ok(av) },
+        Err(e) if e.lexerr.is_some() => ParsedAst { outcome: AstOutcome::LexErr(e) },
+        Err(e) => ParsedAst { outcome: AstOutcome::PErr(e) },
+    }
+}
+
+/// Evaluate a `ParsedAst` handle.  Same result tuples as `eval_template`, and
+/// the same exception objects re-raised for stored parse failures.
+#[pyfunction]
+#[pyo3(signature = (ast, ctx = None, rt = None, name = None, sources = None))]
+fn eval_parsed<'py>(
+    py: Python<'py>,
+    ast: &ParsedAst,
+    ctx: Option<Py<PyAny>>,
+    rt: Option<Py<PyAny>>,
+    name: Option<String>,
+    sources: Option<std::collections::HashMap<String, Option<Vec<(u32, String, Py<PyAny>)>>>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    match &ast.outcome {
+        AstOutcome::Ok(av) => render_av(py, av, ctx, rt, name, sources),
+        // Both failure kinds carry their own encoding; rebuild the tuple from
+        // stored fields exactly as a fresh parse would have.
+        AstOutcome::LexErr(e) | AstOutcome::PErr(e) => err_tuple(py, e),
     }
 }
 
@@ -306,6 +374,9 @@ fn _jutsu(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tokenize, m)?)?;
     m.add_function(wrap_pyfunction!(parse, m)?)?;
     m.add_function(wrap_pyfunction!(eval_template, m)?)?;
+    m.add_function(wrap_pyfunction!(compile_ast, m)?)?;
+    m.add_function(wrap_pyfunction!(eval_parsed, m)?)?;
+    m.add_class::<ParsedAst>()?;
     m.add_class::<eval::MacroFunc>()?;
     Ok(())
 }

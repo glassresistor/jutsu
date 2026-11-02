@@ -164,8 +164,29 @@ The compiler port has two candidate strategies:
       test` unchanged at 17.  Remaining deferred: parent-side error parity
       instead of fallback, async environments falling out wholesale, and the
       performance pass.
-* [ ] performance pass: measure against python-compiled baseline; only keep
-      wins; watch pyo3 round-trips for attribute access and iteration.
+* [x] C-v7a (performance pass part 1): per-source parsed AST cache.  The rust
+      core gained split entry points (`compile_ast` keeps the parse outcome --
+      tree *or* deterministic lex/parse failure -- alive as a `ParsedAst`
+      handle; `eval_parsed` evaluates it, so cached and cold paths are one
+      and the same code).  `rust_eval._cached_compile` keys handles by the
+      lexer-settings tuple (mirroring `lexer.get_lexer`) plus source,
+      template name and filename -- names belong to the key because stored
+      lexer-error arguments bake them in at wrap time; failures cache too,
+      they are deterministic.  LRU-bounded at 1024 entries; older cores fall
+      back through the single-shot entry point transparently.  Evidence
+      (`scripts/bench_perf.py`, this machine, N=3000): expression template
+      `{{ a ~ b }}` -- rust cold unique-source eval 29.7 us vs python cold
+      parse+compile+render 235.8 (8x win), but python warm cached render
+      5.2 us against rust warm cached-AST eval 10.0; statement template --
+      rust cold 143.5 vs python cold 769.8 (~5x win) and python warm 6.3 vs
+      rust warm 20.3 (cache saves ~7x over cold evaluation but still trails
+      compiled execution).  Conclusion held: the cache is a prerequisite for
+      any default flip, yet serving warm renders from rust needs the runtime
+      mirrors next -- per-node pyo3 round-trips are what keep the interpreter
+      above python's compiled path.
+* [ ] performance pass part 2: reduce per-node pyo3 round-trips (attribute
+      access, iteration, `LoopContext` and filter-call paths); re-measure and
+      only keep wins; flip default once warm rust beats python-compiled.
 
 ## Value model notes
 

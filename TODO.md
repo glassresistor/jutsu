@@ -144,18 +144,16 @@ criterion.
       the two codegen SyntaxError classes above.
 * [x] `with`/autoescape scope modifiers via ScopedEvalContextModifier
       (slice C-v6).
-* [ ] performance pass: avoid pyo3 round-trips for hot attribute lookups where
-      safe; measure against python-compiled baseline and only keep wins.
-      Baseline measured after slice C-v1 (simple `{{ a ~ b }}`, 2000 iterations,
-      this machine): python parse+compile+render 234 us/op, rust parse+evaluate
-      19 us/op (12x faster), but a *cached* python template renders in 5 us/op.
-      Conclusion: the rust evaluator only wins for templates that are rendered
-      once or twice (e.g. `Environment.from_string`), so before flipping any
-      default it must cache parsed ASTs per source (and eventually compiled
-      state) -- otherwise the python code path stays faster for warm caches.
-      Same conclusion after slice C-v2 (statement template, 2000 iters):
-      rust parse+eval 129 us vs python compile+render 770 us (~6x cold), but
-      cached python render only 6.2 us.
+* [x] cache parsed ASTs per source (slice C-v7a): split `compile_ast` /
+      `eval_parsed` entry points plus an LRU handle cache in `rust_eval`,
+      keyed by lexer settings + source + name + filename; parse failures
+      cached too.  Warm cached-AST evaluation measured ~7x cheaper than cold
+      (`scripts/bench_perf.py`: statement template 143.5 us -> 20.3 us;
+      expression 29.7 -> 10.0).  Full suite green with the cache active.
+* [ ] performance pass (open remainder): warm rust still trails python's
+      compiled cached render (~10-20 us vs ~5-6 us on these shapes), so the
+      default stays unflipped; next lever is cutting per-node pyo3
+      round-trips toward the runtime mirrors (`runtime.rs` item above).
 * [ ] differential renderer validation: render every test template both ways,
       compare bytes + exceptions; fuzz too
 * [ ] flip default once suite green; keep python codegen path behind flag
