@@ -512,3 +512,33 @@ environment and renders through a mixed AST (jinja2.nodes.Call carrying
 jutsu.nodes.Const children) purely by structural coincidence.  The
 `jinja2`-named alias package question stays deferred to the Phase-F drop-in
 experiment.
+
+## Working state (2026-11-02): sweep after an interrupted multi-agent night
+
+No session finished cleanly between commits f978110 and this line; the
+working tree carried half-finished work from two in-flight slices.  This
+sweep records what landed, what is still open, and cleans up scratch files
+left inside the repo (moved to scratch/junk-2026-11-02/, not deleted).
+
+* Slice C-v8a is IN PROGRESS, not complete.  Landed: rust `check_supported`
+  serve-decision entry point; python-side eligibility predicate
+  (`rust_eval.eligible`), per-template serve verdict cached on the template
+  object, and render-through-rust wired into `Template.render` behind
+  `JUTSU_RUST_EVAL` (default off); template source retention through
+  `Environment.from_string` and the loaders' `from_code` path.  The scan now
+  also rejects dynamic call / filter / test arguments at compile time, which
+  closes the verdict-vs-scan disagreement behind the two 'dynamic call
+  arguments' suite failures reported by D1.  Measured: default suite green at
+  1036 passed with the wiring in place; cargo unchanged at 17; under
+  `JUTSU_RUST_EVAL=1` five failures remain (5 failed, 1031 passed) -- all
+  previously known output/traceback divergences, now down from seven.  Not
+  done: serve-side tests, render instrumentation, and the remaining five
+  shapes; exit criteria in PLAN_C_DONE.md still apply.
+* Phase E slice E0 is STARTED, not complete.  `js/package.json` plus a
+  repaired `js/src/values.mjs` (the file was truncated mid-function: the
+  `reprElement` body, `objectTypeRepr`, `isPlainObjectish` and the closing
+  brace of the `Undefined` class were missing; now completed against
+  `runtime.py` / `utils.object_type_repr` message shapes).  Clean under
+  node --check.  Filters, tests registry, environment scaffold, index and
+  the js/test/ suites are not started; nothing in js/ is settled behavior
+  yet -- no E0 rule is pinned until its differential test lands.

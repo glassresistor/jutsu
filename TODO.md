@@ -173,6 +173,15 @@ criterion.
       predicate, per-template serve verdict with compile-time scan/analyses,
       lazy python codegen on fallback and module paths; suite green with the
       flag on plus instrumentation of rust-served renders.
+      Status 2026-11-02 (in progress, wiring landed): rust `check_supported`
+      entry point (scan + layout + cross-template-node refusal), python-side
+      `rust_eval.eligible` / `serve_verdict` / `render_served`, per-template
+      verdict cached on `Template._rust_serve`, source retention through
+      `from_code`/loaders.  Default suite green at 1036 passed with the
+      wiring in place; under `JUTSU_RUST_EVAL=1` five divergences remain
+      (listed in the D1/D2 follow-up entry, updated).  Still to do: resolve
+      or refuse those five shapes at scan time, serve-side tests and render
+      instrumentation.
 * [ ] slice C-v8b: cross-template serving -- include/import/extends targets
       served by rust when eligible instead of implicitly python-compiled via
       the loaders; join-path/tname semantics preserved (join-path suite is
@@ -225,6 +234,14 @@ PLAN_D_PARALLEL.md for file ownership, conflict matrix and waves.
       output/traceback divergences from rust serving.  All sit inside
       PLAN_C_DONE.md's scope (R1 decline path, error paths recorded not
       chased), not D1's; the extension suites pass under both settings.
+      Update 2026-11-02: the dynamic-call pair is RESOLVED -- the scan now
+      rejects dynamic call / filter / test arguments (`*a` / `**k`) at
+      compile time, so a cached serve verdict can never disagree with the
+      per-render scan; both tests pass under the flag.  Five remain: the
+      pass_context trio, test_multiple_tests (suspected cause: each
+      side-effecting test callable fires twice under rust serving where
+      python's compiled code short-circuits the `or`) and
+      test_runtime_error -- output/traceback divergences from rust serving.
 * [ ] D2 follow-up: decide whether registration should reject non-jutsu
       Extension subclasses instead of duck-accepting them -- today a mixed-
       AST render works purely by structural coincidence, so nothing guards
@@ -242,6 +259,12 @@ PLAN_D_PARALLEL.md for file ownership, conflict matrix and waves.
       evidence.
 
 ## Phase E -- JavaScript / wasm packaging
+* [ ] slice E0 (PLAN_JS.md): JS scaffold + value bridge.  Status 2026-11-02
+      (in progress): `js/package.json` and `js/src/values.mjs` written (the
+      truncated file left by the interrupted session repaired: reprElement,
+      objectTypeRepr, isPlainObjectish, Undefined class close); parses clean
+      under node --check.  Not started: filters.mjs, tests.mjs,
+      environment.mjs, index.mjs, js/test/ suites, golden-value script.
 * [ ] split pyo3 glue behind cargo feature `python`; core API becomes pure rust
       (`lexer::tokenize`, `parser::parse` -> AST enum, `render(cfg, ast, ctx)`)
 * [ ] `jutsu-wasm` crate: wasm-bindgen wrapper exposing compile/render with a
