@@ -200,6 +200,14 @@ pub struct Session {
     srcs: std::collections::HashMap<String, Option<Vec<PToken>>>,
     /// Parsed and prepared units by template name (slice C-v4).
     units: RefCell<HashMap<String, Rc<UnitInfo>>>,
+    /// Stable runtime functions cached at session build so every use reuses
+    /// the same object instead of a per-node pyo3 attribute lookup
+    /// (performance pass part 2).  Module-level objects never change during a
+    /// render, so this is byte-identical to fetching them on demand.
+    esc: Py<PyAny>,
+    markup_cls: Py<PyAny>,
+    str_join: Py<PyAny>,
+    markup_join: Py<PyAny>,
 }
 
 /// How a slot is initialized when its scope is entered (mirrors the code
@@ -516,6 +524,12 @@ impl Session {
         let loopctx = rt.getattr("LoopContext")?;
         let ns = rt.getattr("Namespace")?;
         let undef = env.getattr("undefined")?;
+        // Stable runtime functions cached once per session (performance pass
+        // part 2): reusing them avoids a pyo3 attribute lookup on every use.
+        let esc = rt.getattr("escape")?;
+        let markup_cls = rt.getattr("Markup")?;
+        let str_join = rt.getattr("str_join")?;
+        let markup_join = rt.getattr("markup_join")?;
         Ok(Rc::new(Session {
             env: env.unbind(),
             evalctx: evalctx.unbind(),
@@ -527,6 +541,10 @@ impl Session {
             undef: undef.unbind(),
             loopctx: loopctx.unbind(),
             ns: ns.unbind(),
+            esc: esc.unbind(),
+            markup_cls: markup_cls.unbind(),
+            str_join: str_join.unbind(),
+            markup_join: markup_join.unbind(),
             autoescape,
             name,
             rec: RefCell::new(Vec::new()),
@@ -679,6 +697,18 @@ impl<'py> Ev<'py> {
     fn ns(&self) -> Bound<'py, PyAny> {
         self.s.ns.bind(self.py).clone()
     }
+    fn esc(&self) -> Bound<'py, PyAny> {
+        self.s.esc.bind(self.py).clone()
+    }
+    fn markup_cls(&self) -> Bound<'py, PyAny> {
+        self.s.markup_cls.bind(self.py).clone()
+    }
+    fn str_join(&self) -> Bound<'py, PyAny> {
+        self.s.str_join.bind(self.py).clone()
+    }
+    fn markup_join(&self) -> Bound<'py, PyAny> {
+        self.s.markup_join.bind(self.py).clone()
+    }
 
     /// Raw context lookup: `Context.resolve_or_missing`, `None` for missing.
     fn raw_resolve(&self, name: &str) -> Result<Option<Py<PyAny>>, PyErr> {
@@ -828,10 +858,10 @@ impl<'py> Ev<'py> {
     fn out_wrap(&self, v: &Bound<'py, PyAny>) -> ERes<Bound<'py, PyAny>> {
         let st = *self.aestate.borrow();
         if !st.vol {
-            return Ok(if st.ae { self.rt().getattr("escape")?.call1((v,))? } else { v.str()?.into_any() });
+            return Ok(if st.ae { self.esc().call1((v,))? } else { v.str()?.into_any() });
         }
         if self.live_ae()? {
-            Ok(self.rt().getattr("escape")?.call1((v,))?)
+            Ok(self.esc().call1((v,))?)
         } else {
             Ok(v.str()?.into_any())
         }
@@ -847,10 +877,10 @@ impl<'py> Ev<'py> {
         let tup = PyTuple::new(self.py, parts)?;
         let st = *self.aestate.borrow();
         if !st.vol && st.ae {
-            let mj = self.rt().getattr("markup_join")?;
+            let mj = self.markup_join();
             Ok(mj.call1((tup,))?)
         } else {
-            let sj = self.rt().getattr("str_join")?;
+            let sj = self.str_join();
             Ok(sj.call1((tup,))?)
         }
     }
@@ -896,7 +926,7 @@ impl<'py> Ev<'py> {
                 if !ae {
                     return Ok(Some(raw));
                 }
-                self.try_fold(self.rt().getattr("Markup")?.call1((&raw,)))
+                self.try_fold(self.markup_cls().call1((&raw,)))
             }
             "Tuple" | "List" => {
                 let items = match args.first() { Some(Av::List(l)) => l, _ => return Ok(None) };
@@ -1921,7 +1951,7 @@ other => Err(nope(other.to_string())),
                             if st.vol {
                                 if let Some(c) = self.fold(it, true, st.ae)? {
                                     let esc: Bound<'py, PyAny> = if st.ae {
-                                        self.rt().getattr("escape")?.call1((&c,))?
+                                        self.esc().call1((&c,))?
                                     } else { c };
                                     out.push(esc.str()?.into_any());
                                     continue;
@@ -2296,7 +2326,7 @@ other => Err(nope(other.to_string())),
         let st = *self.aestate.borrow();
         let wrap = if !st.vol { st.ae } else { self.live_ae()? };
         if wrap {
-            value = self.rt().getattr("Markup")?.call1((&value,))?;
+            value = self.markup_cls().call1((&value,))?;
         }
         let applied = self.eval_filter_hole(&args[1], &value)?;
         self.pop_scope();
@@ -2357,7 +2387,7 @@ other => Err(nope(other.to_string())),
         // identity)(...)` -- a runtime check of the live attribute, emitted
         // unconditionally regardless of the compile-time state.
         if self.live_ae()? {
-            value = self.rt().getattr("Markup")?.call1((&value,))?;
+            value = self.markup_cls().call1((&value,))?;
         }
         self.pop_scope();
         self.store_assign(&args[0], value)
@@ -2584,7 +2614,7 @@ other => Err(nope(other.to_string())),
         let st = *self.aestate.borrow();
         let wrap = if !st.vol { st.ae } else { self.live_ae()? };
         if wrap {
-            return Ok(self.rt().getattr("Markup")?.call1((&joined,))?);
+            return Ok(self.markup_cls().call1((&joined,))?);
         }
         Ok(joined)
     }
