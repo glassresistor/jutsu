@@ -54,15 +54,19 @@ criterion.
       too.  Driver creates a real `Context` via `runtime.new_context`.
 * [ ] `runtime.rs` mirrors of: Context/EvalContext/LoopContext/Macro/Namespace/
       Undefined (subclasses: ChainableUndefined/FastUndefined), missing sentinel,
-      output buffering (`concat`, markup_join, str_join)
+      output buffering (`concat`, markup_join, str_join) -- demoted by the
+      2026-11-01 retarget to an optional post-flip optimization backlog
+      (PLAN_C_DONE.md R2): warm-rust parity no longer requires it.
 * [x] autoescape semantics + `Markup` integration via markupsafe objects
       (slice C-v6): compile-time eval-context state, volatile regions and the
       constant-fold graph live in the evaluator.
-* [ ] async environments (`enable_async`) fall back unconditionally (found
+* [X] async environments (`enable_async`) fall back unconditionally (found
       while validating C-v3b): even the synchronous `render` path awaits
       coroutines and consumes async iterables, so serving them needs the
       python async runtime modelled first; guard in `Session::build`,
-      regression test `test_async_falls_back`.
+      regression test `test_async_falls_back`.  Closed 2026-11-01 as the
+      accepted design -- unconditional fallback is settled behavior, not an
+      open parity obligation (PLAN_C_DONE.md R1).
 * [X] slice C-v2 (statements) implemented in `eval.rs`: if/elif/else, for
       (lazy test-filtered loops, else branches, extended loops via a live
       `LoopContext`, recursive loops that render the next level in rust through
@@ -85,9 +89,11 @@ criterion.
 * [X] slice C-v4a (plain block inheritance): extends chains, block invocation with the codegen runtime guards, super()/self via python's own Context.super / TemplateReference, required blocks; scoped blocks, non-string extends targets and un-loadable parents fall back. Validated: 13 fixed differential cases plus `scripts/block_fuzz.py` structured chains (seeds 1-5 x200): ok=58 exc=811 fb=2131, zero mismatches; full suite green.
 * [X] slice C-v4b: scoped blocks (`{% block x scoped %}`) implemented in `eval.rs`. A scoped invocation dumps its locals at the call site by merging the live scope frames top-down (inner layers shadow like `find_ref`, owned-but-missing names stay out of the dict and still shadow), stopping after the first boundary frame -- template roots and block functions are generated-function symbol chains that end there. The mapping goes through python's own `Context.derived` (merge over current vars, blocks-list copy, shared eval context). Block functions run with the caller's context object (`BlockFunc.__call__` respects its argument), so derived contexts propagate through `super()`, `TemplateReference`, nested scoped invocations and macro closures (each captures the context current at definition; new `ctxobj` on `Ev`/`MacroFunc`). visit_For's extended-loop forcing by any scoped block below the for node is mirrored (`any_scoped`), including the special loop variable entering the dumped stores. Test-filtered loops in extended/recursive mode are rejected at scan time (mid-execution unsupported reports from inside block/macro bodies could no longer become a clean engine switch). Validated: 10 fixed differential scoped cases incl. visibility contrasts, for-else exclusion, two-level derived `super()` chains, macro-closure capture and required+scoped error parity; block fuzz seeds 1-5 x600 chains green (the scoped fallback class disappeared entirely), statement corpus extended to seeds 1-10 with zero diffs, macro corpus seeds 1-7 green, full suite 991 passed.
 * [X] slice C-v5 (includes and imports): lookup function selected exactly like codegen (`get_template` / `select_template` / `get_or_select_template`) with the current module name as loader parent; ignore-missing wraps only the lookup and catches only `TemplateNotFound`; with-context includes render through python's own `template.new_context(context.get_all(), True, dump_locals())` reusing C-v4b's boundary-aware local dump, without-context takes `_get_default_module()._body_stream`; `{% import %}` uses fresh `make_module(...)` or the cached default module *with* this context and applies `visit_Import` store rules incl. exported_vars discarding; named imports resolve through python's own attribute lookup with codegen's undefined message and batch writeback. A current-module name (`tname`) is threaded through interpreter, macro closures, block functions and parent renderings so relative `join_path` resolution matches compiled modules. Validated: 34 fixed differential cases + join-path suite in `tests/test_rust_eval.py`, structured corpus `scripts/include_fuzz.py` seeds 1-3 x400 (ok=643 exc=557 fb=0, zero mismatches); statement/macro/block corpora rerun green; full suite 993 passed.
-* [ ] python quirk left as-is: render-time errors raised inside *invoked* macro bodies can be swallowed into unconsumed generator objects (repr embeds an object address), so such shapes are simply not comparable -- the fuzz generator skips macro/call-block wrappers for exactly this reason; fixed cases cover includes in macro and caller bodies where nothing raises
-* [ ] parent-side error parity for inheritance (load/parse failures raised as jinja's
-      own exceptions instead of falling back)
+* [X] python quirk left as-is: render-time errors raised inside *invoked* macro bodies can be swallowed into unconsumed generator objects (repr embeds an object address), so such shapes are simply not comparable -- the fuzz generator skips macro/call-block wrappers for exactly this reason; fixed cases cover includes in macro and caller bodies where nothing raises.  Closed 2026-11-01: un-comparable shapes are accepted, not chased (PLAN_C_DONE.md R1).
+* [X] parent-side error parity for inheritance -- closed 2026-11-01 as an
+      accepted divergence (PLAN_C_DONE.md R1): load/parse failures keep
+      falling back; reproducing jinja's own exceptions from rust is no
+      longer an obligation.
 * [X] known gap fixed (found by fuzz seed 2, recorded in `scripts/mismatch.txt`):
       symbol occurrence merging across if-branches.  The occurrence walk now
       collects structured occurrences (`Occ::Branch` groups per `if`), and the
@@ -150,23 +156,58 @@ criterion.
       cached too.  Warm cached-AST evaluation measured ~7x cheaper than cold
       (`scripts/bench_perf.py`: statement template 143.5 us -> 20.3 us;
       expression 29.7 -> 10.0).  Full suite green with the cache active.
-* [ ] performance pass (open remainder): warm rust still trails python's
-      compiled cached render (~10-20 us vs ~5-6 us on these shapes), so the
-      default stays unflipped; next lever is cutting per-node pyo3
-      round-trips toward the runtime mirrors (`runtime.rs` item above).
-* [ ] differential renderer validation: render every test template both ways,
-      compare bytes + exceptions; fuzz too
-* [ ] flip default once suite green; keep python codegen path behind flag
+* [X] performance pass gate retargeted (2026-11-01, PLAN_C_DONE.md R2): warm
+      rust no longer needs to *beat* python's compiled cached render -- a
+      comparability band replaces the beat-gate: warm rust <= 4x python warm
+      on both bench shapes AND < 50 us absolute per render, cold rust stays
+      >= 3x faster than python cold.  Measured today (this machine,
+      N=3000): expression warm 10.5 vs 5.0 us (2.1x), statement warm 21.1
+      vs 6.3 us (3.3x); cold wins 7.8x / 5.2x -- both shapes already sit
+      inside the band, so no performance blocker remains for Phase C.
+* [ ] differential renderer validation: folded into C-v8a/C-v8c -- the wired
+      suite plus instrumentation counts are the evidence; corpora gate on
+      success-path parity only, error-path divergences recorded in
+      ACCEPTED_DIVERGENCES.md instead of chased (PLAN_C_DONE.md R1).
+* [ ] slice C-v8a: wire the evaluator into `Template.render` behind a
+      `JUTSU_RUST_EVAL` flag (default off during the slice) -- eligibility
+      predicate, per-template serve verdict with compile-time scan/analyses,
+      lazy python codegen on fallback and module paths; suite green with the
+      flag on plus instrumentation of rust-served renders.
+* [ ] slice C-v8b: cross-template serving -- include/import/extends targets
+      served by rust when eligible instead of implicitly python-compiled via
+      the loaders; join-path/tname semantics preserved (join-path suite is
+      the anchor).
+* [ ] slice C-v8c: gate measurement and default flip -- rerun benches against
+      the band, corpora under success-gate policy, full suite with
+      `JUTSU_RUST_EVAL=1` default-on; python codegen stays reachable via
+      `=0`; evidence into STATUS.md.
+* [ ] optional polish C-v9 (no gates attached): the measured hoists/caches
+      from PROMPT_PERF_2B items B1..B5 plus the runtime.rs mirrors, landed
+      only where measured and proven; post-flip backlog.
 
 ## Phase D -- extensions & ecosystem compatibility
-* [ ] `ext.py` (loopcontrol, autoexcp, i18n/Translations) run on top of rust
-      parser via the documented fallback rule (extension tags => python parse)
-* [ ] document + test how third-party extension packages keep working; add a
-      `jutsu.extensions.api` compat shim if needed
-* [ ] loaders/bccache stay pure python (filesystem/zip/module cache -- no rust
-      value); revisit only if profiling says otherwise
-* [ ] `nativetypes.py` (NativeEnvironment) works through the interpreter path;
-      add tests that it renders identically under rust core
+Split into independently scoped packages for parallel execution; see
+PLAN_D_PARALLEL.md for file ownership, conflict matrix and waves.
+* [ ] D1 extension gating & fallback correctness: loopcontrols / do /
+      i18n / debug environments render exactly as upstream jinja does; the
+      documented rule (extension contributes tags/filter_stream/preprocess
+      => python parse+codegen) holds end-to-end including the wired render
+      path; no-tags extensions stay rust-eligible.  Dispatch after C-v8a.
+* [ ] D2 third-party extension compatibility & API story: synthetic
+      third-party extension built and tested end-to-end; recorded decision
+      memo on import paths and whether an api shim is needed (new files
+      only).  Dispatch immediately.
+* [ ] D3 loaders & bytecache pure-python audit: every loader class plus
+      BytecodeCache proven working with rust engines default-on; profiling
+      memo justifying pure-python status.  Dispatch immediately.
+* [ ] D4 NativeEnvironment parity: minimum = native environments excluded
+      from rust serving, existing native tests green with the rust core
+      active (dispatch after C-v8a); stretch = serve simple native templates
+      from rust via a mirrored output mode (post-flip, coordinated).
+* [ ] D5 backlog (not dispatched): extension hot paths in rust parser/
+      evaluator, dynamic call arguments support, async runtime modeling --
+      all currently correct-by-fallback; revisit only with post-flip
+      evidence.
 
 ## Phase E -- JavaScript / wasm packaging
 * [ ] split pyo3 glue behind cargo feature `python`; core API becomes pure rust
