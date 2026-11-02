@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "extpkg"
+version = "0.1"
+description = "Synthetic third-party jutsu extension used by D2's compat tests."
+requires-python = ">=3.10"
+dependencies = ["jutsu"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
