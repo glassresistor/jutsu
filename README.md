@@ -6,10 +6,11 @@
 in which the engine internals are being rewritten in Rust, while the Python package stays the public interface. The end state is a native compiled core that
 keeps working with the existing Jinja2 extensions, loaders and ecosystem.
 
-> **Status: work in progress.** The lexer, parser and (partially) the evaluator
-> already run in Rust; code generation, macros, block inheritance and includes
-> are still Python. Nothing here is installed or published yet — treat this as a
-> design document for what `jutsu` will be when it is done.
+> **Status: work in progress.** The lexer, parser and evaluator already run in
+> Rust; code generation stays Python. The evaluator is wired into
+> `Template.render` behind `JUTSU_RUST_EVAL` but not yet the default (slice
+> C-v8a in progress — see `PLAN_C_DONE.md`). Nothing here is installed or
+> published yet.
 
 ## What it will be
 
@@ -59,23 +60,23 @@ loaders, `Undefined` / `StrictUndefined` / `ChainableUndefined` /
 | Rust lexer (`crates/jutsu-core/src/lexer.rs`) | **done**, wired into `Lexer.tokeniter` |
 | Rust parser (`crates/jutsu-core/src/parser.rs`) | **done**, default engine (`JUTSU_RUST_PARSER=0` to opt out) |
 | Packaging (maturin wheel with Rust core) | done |
-| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | expressions + statements + scoping + filter blocks; **not yet wired into `Template.render`** |
-| Code generator / runtime | still Python (macros, block inheritance, includes are next) |
+| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | expressions + statements + scoping + filter blocks + macros — done; wired into `Template.render` behind `JUTSU_RUST_EVAL` (**default off**, slice C-v8a in progress) |
+| Code generator / runtime | still Python by design: bytecode emission was rejected, and codegen stays reachable as the fallback path (`PLAN_C_DONE.md`) |
 
 ### Performance evidence so far
 
-Statement template, 2000 iterations:
+Latest numbers (`scripts/bench_perf.py`, N=3000, part-2a build):
 
-| Path | Time |
-|---|---|
-| Python parse + compile | 735 µs |
-| Python compile + render | 770 µs |
-| Python **cached** render | 6.2 µs |
-| Rust parse + eval | 129 µs |
+| shape | rust cold | python cold | python warm | rust warm |
+|---|---|---|---|---|
+| expression `{{ a ~ b }}` | 30.2 µs | 234.6 µs | 5.0 µs | 10.5 µs |
+| statement (set/for/if/loop/with) | 148.0 µs | 771.9 µs | 6.3 µs | 21.1 µs |
 
-That is roughly **6× faster cold**, but still far behind a warm Python cache —
-the AST-cache prerequisite before any default can be flipped to the Rust path
-for template *rendering* (as opposed to parsing).
+Cold rust wins ~8× / ~5×; warm rust costs 2.1× / 3.3× of python's cached path.
+The completion criteria were retargeted (2026-11-01, `PLAN_C_DONE.md`): a
+warm-rust *beat* gate was judged unreachable for a tree-walking interpreter,
+so warm loads only need to sit in a comparability band (≤ 4× python warm and
+< 50 µs absolute), which these numbers already satisfy.
 
 ## How correctness is proven
 
@@ -112,7 +113,9 @@ point) while reproducing CPython `re` semantics exactly:
 
 Extensions gate the switch: any extension that contributes tags (i18n `trans`,
    `do`, loopcontrol's `break`/`continue`, debug) or overrides
-   `filter_stream`/`preprocess` forces the Python parser.
+   `filter_stream`/`preprocess` forces the Python parser. The same predicate
+   gates rust *serving* (`rust_eval.eligible`), which additionally excludes
+   async, sandboxed and native-value environments.
 
 ## Roadmap
 
@@ -120,8 +123,8 @@ Extensions gate the switch: any extension that contributes tags (i18n `trans`,
 |---|---|---|
 | **A** | Fork Jinja2 as `jutsu`; Rust lexer wired into `Lexer.tokeniter` | ✅ done |
 | **B** | Full expression + statement grammar in Rust; AST rebuilt via `ast_rebuild.py`; default flipped | ✅ done |
-| **C** | Compiler/evaluator: expressions → statements/scoping → filter blocks → macros → inheritance/includes | 🟨 in progress |
-| **D** | Extensions (`i18n`, `autoescape`, `looplevel`) running on the Rust path; `NativeEnvironment` parity | ⬜ open |
+| **C** | Compiler/evaluator: expressions → statements/scoping → filter blocks → macros → inheritance/includes | 🟨 in progress — evaluator done and wired behind `JUTSU_RUST_EVAL` (default off); remainder per `PLAN_C_DONE.md`: finish C-v8a, cross-template serving v8b, measurement + default flip v8c |
+| **D** | Extensions (`i18n`, `autoescape`, `looplevel`) running on the Rust path; `NativeEnvironment` parity | 🟨 in progress — D1 gating/fallback and D2 third-party extension compat landed; D3/D4 open |
 | **E** | Split pyo3 glue behind a cargo feature; ship `jutsu-wasm` / `@jutsu/core` for JavaScript | ⬜ open |
 | **F** | Release engineering: wheel matrix (manylinux/macOS/Windows), sdist, clippy, versioning story | ⬜ open |
 
@@ -188,6 +191,7 @@ cargo test                    # Rust unit tests
 |---|---|---|
 | `JUTSU_RUST_LEXER` | `1` | `=0` falls back to the pure-Python lexer (`Lexer._tokeniter_python`) |
 | `JUTSU_RUST_PARSER` | `1` | `=0` switches parsing back to the Python parser |
+| `JUTSU_RUST_EVAL` | `0` | `=1` lets eligible templates render through the Rust evaluator instead of python codegen (slice C-v8a; default flips at v8c) |
 
 The Rust core is optional at import time: if `_jutsu` cannot be imported,
 `jutsu` degrades to the pure-Python implementation rather than failing.
