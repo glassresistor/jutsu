@@ -1,0 +1,2923 @@
+{
+ "generated_by": "scripts/js_golden.py",
+ "cases": [
+  {
+   "id": "undef-hint",
+   "op": "undefMessage",
+   "kind": "base",
+   "hint": "No first item, sequence was empty.",
+   "obj": null,
+   "name": null,
+   "error": [
+    "UndefinedError",
+    "No first item, sequence was empty."
+   ]
+  },
+  {
+   "id": "undef-name",
+   "op": "undefMessage",
+   "kind": "base",
+   "hint": null,
+   "obj": null,
+   "name": "foo",
+   "error": [
+    "UndefinedError",
+    "'foo' is undefined"
+   ]
+  },
+  {
+   "id": "undef-attr",
+   "op": "undefMessage",
+   "kind": "base",
+   "hint": null,
+   "obj": {
+    "dict": [
+     [
+      {
+       "str": "a"
+      },
+      {
+       "num": [
+        1,
+        "int"
+       ]
+      }
+     ]
+    ]
+   },
+   "name": "b",
+   "error": [
+    "UndefinedError",
+    "'dict object' has no attribute 'b'"
+   ]
+  },
+  {
+   "id": "undef-element-int",
+   "op": "undefMessage",
+   "kind": "base",
+   "hint": null,
+   "obj": {
+    "list": [
+     {
+      "num": [
+       1,
+       "int"
+      ]
+     },
+     {
+      "num": [
+       2,
+       "int"
+      ]
+     }
+    ]
+   },
+   "name": 0,
+   "error": [
+    "UndefinedError",
+    "list object has no element 0"
+   ]
+  },
+  {
+   "id": "undef-element-str",
+   "op": "undefMessage",
+   "kind": "base",
+   "hint": null,
+   "obj": {
+    "list": [
+     {
+      "num": [
+       1,
+       "int"
+      ]
+     },
+     {
+      "num": [
+       2,
+       "int"
+      ]
+     }
+    ]
+   },
+   "name": "x",
+   "error": [
+    "UndefinedError",
+    "'list object' has no attribute 'x'"
+   ]
+  },
+  {
+   "id": "undef-tuple-element",
+   "op": "undefMessage",
+   "kind": "base",
+   "hint": null,
+   "obj": {
+    "list": [
+     {
+      "num": [
+       1,
+       "int"
+      ]
+     },
+     {
+      "num": [
+       2,
+       "int"
+      ]
+     }
+    ]
+   },
+   "name": 5,
+   "error": [
+    "UndefinedError",
+    "tuple object has no element 5"
+   ]
+  },
+  {
+   "id": "undef-strict-name",
+   "op": "undefMessage",
+   "kind": "strict",
+   "hint": null,
+   "obj": null,
+   "name": "foo",
+   "error": [
+    "UndefinedError",
+    "'foo' is undefined"
+   ]
+  },
+  {
+   "id": "undef-chain-name",
+   "op": "undefMessage",
+   "kind": "chainable",
+   "hint": null,
+   "obj": null,
+   "name": "foo",
+   "error": [
+    "UndefinedError",
+    "'foo' is undefined"
+   ]
+  },
+  {
+   "id": "undef-debug-name",
+   "op": "undefMessage",
+   "kind": "debug",
+   "hint": null,
+   "obj": null,
+   "name": "foo",
+   "error": [
+    "UndefinedError",
+    "'foo' is undefined"
+   ]
+  },
+  {
+   "id": "undef-str",
+   "op": "undefOp",
+   "kind": "base",
+   "hint": null,
+   "obj": null,
+   "name": "foo",
+   "action": "str",
+   "params": {},
+   "value": {
+    "str": ""
+   }
+  },
+  {
+   "id": "undef-bool",
+   "op": "undefOp",
+   "kind": "base",
+   "hint": null,
+   "obj": null,
+   "name": "foo",
+   "action": "bool",
+   "params": {},
+   "value": {
+    "bool": false
+   }
+  },
+  {
+   "id": "undef-len",
+   "op": "undefOp",
+   "kind": "base",
+   "hint": null,
+   "obj": null,
+   "name": "foo",
+   "action": "len",
+   "params": {},
+   "value": {
+    "num": [
+     0,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "undef-iter",
+   "op": "undefOp",
+   "kind": "base",
+   "hint": null,
+   "obj": null,
+   "name": "foo",
+   "action": "iter",
+   "params": {},
+   "value": {
+    "list": []
+   }
+  },
+  {
+   "id": "undef-add",
+   "op": "undefOp",
+   "kind": "base",
+   "hint": null,
+   "obj": null,
+   "name": "foo",
+   "action": "add",
+   "params": {},
+   "error": [
+    "UndefinedError",
+    "'foo' is undefined"
+   ]
+  },
+  {
+   "id": "undef-call",
+   "op": "undefOp",
+   "kind": "base",
+   "hint": null,
+   "obj": null,
+   "name": "foo",
+   "action": "call",
+   "params": {},
+   "error": [
+    "UndefinedError",
+    "'foo' is undefined"
+   ]
+  },
+  {
+   "id": "undef-get",
+   "op": "undefOp",
+   "kind": "base",
+   "hint": null,
+   "obj": null,
+   "name": "foo",
+   "action": "get",
+   "params": {
+    "attr": "bar"
+   },
+   "error": [
+    "UndefinedError",
+    "'foo' is undefined"
+   ]
+  },
+  {
+   "id": "strict-str",
+   "op": "undefOp",
+   "kind": "strict",
+   "hint": null,
+   "obj": null,
+   "name": "foo",
+   "action": "str",
+   "params": {},
+   "error": [
+    "UndefinedError",
+    "'foo' is undefined"
+   ]
+  },
+  {
+   "id": "strict-bool",
+   "op": "undefOp",
+   "kind": "strict",
+   "hint": null,
+   "obj": null,
+   "name": "foo",
+   "action": "bool",
+   "params": {},
+   "error": [
+    "UndefinedError",
+    "'foo' is undefined"
+   ]
+  },
+  {
+   "id": "strict-len",
+   "op": "undefOp",
+   "kind": "strict",
+   "hint": null,
+   "obj": null,
+   "name": "foo",
+   "action": "len",
+   "params": {},
+   "error": [
+    "UndefinedError",
+    "'foo' is undefined"
+   ]
+  },
+  {
+   "id": "debug-str",
+   "op": "undefOp",
+   "kind": "debug",
+   "hint": null,
+   "obj": null,
+   "name": "foo",
+   "action": "str",
+   "params": {},
+   "value": {
+    "str": "{{ foo }}"
+   }
+  },
+  {
+   "id": "debug-str-hint",
+   "op": "undefOp",
+   "kind": "debug",
+   "hint": "hmm",
+   "obj": null,
+   "name": null,
+   "action": "str",
+   "params": {},
+   "value": {
+    "str": "{{ undefined value printed: hmm }}"
+   }
+  },
+  {
+   "id": "debug-str-obj",
+   "op": "undefOp",
+   "kind": "debug",
+   "hint": null,
+   "obj": {
+    "dict": [
+     [
+      {
+       "str": "k"
+      },
+      {
+       "num": [
+        1,
+        "int"
+       ]
+      }
+     ]
+    ]
+   },
+   "name": "kk",
+   "action": "str",
+   "params": {},
+   "value": {
+    "str": "{{ no such element: dict object['kk'] }}"
+   }
+  },
+  {
+   "id": "chain-str",
+   "op": "undefOp",
+   "kind": "chainable",
+   "hint": null,
+   "obj": null,
+   "name": "foo",
+   "action": "str",
+   "params": {},
+   "value": {
+    "str": ""
+   }
+  },
+  {
+   "id": "chain-get",
+   "op": "undefOp",
+   "kind": "chainable",
+   "hint": null,
+   "obj": null,
+   "name": "foo",
+   "action": "get",
+   "params": {
+    "attr": "bar"
+   },
+   "value": {
+    "undefined": {
+     "message": "'foo' is undefined",
+     "str": ""
+    }
+   }
+  },
+  {
+   "id": "chain-item",
+   "op": "undefOp",
+   "kind": "chainable",
+   "hint": null,
+   "obj": null,
+   "name": "foo",
+   "action": "item",
+   "params": {
+    "key": 1
+   },
+   "value": {
+    "undefined": {
+     "message": "'foo' is undefined",
+     "str": ""
+    }
+   }
+  },
+  {
+   "id": "upper",
+   "op": "filter",
+   "name": "upper",
+   "input": {
+    "value": {
+     "str": "h\u00e9llo"
+    },
+    "args": []
+   },
+   "value": {
+    "str": "H\u00c9LLO"
+   }
+  },
+  {
+   "id": "lower",
+   "op": "filter",
+   "name": "lower",
+   "input": {
+    "value": {
+     "str": "H\u00c9LLO"
+    },
+    "args": []
+   },
+   "value": {
+    "str": "h\u00e9llo"
+   }
+  },
+  {
+   "id": "cap",
+   "op": "filter",
+   "name": "capitalize",
+   "input": {
+    "value": {
+     "str": "hELLO wORLD"
+    },
+    "args": []
+   },
+   "value": {
+    "str": "Hello world"
+   }
+  },
+  {
+   "id": "title",
+   "op": "filter",
+   "name": "title",
+   "input": {
+    "value": {
+     "str": "the quick brown fox-jumps over"
+    },
+    "args": []
+   },
+   "value": {
+    "str": "The Quick Brown Fox-Jumps Over"
+   }
+  },
+  {
+   "id": "trim",
+   "op": "filter",
+   "name": "trim",
+   "input": {
+    "value": {
+     "str": "  hi  "
+    },
+    "args": []
+   },
+   "value": {
+    "str": "hi"
+   }
+  },
+  {
+   "id": "trim-chars",
+   "op": "filter",
+   "name": "trim",
+   "input": {
+    "value": {
+     "str": "xxhixx"
+    },
+    "args": [
+     {
+      "str": "x"
+     }
+    ]
+   },
+   "value": {
+    "str": "hi"
+   }
+  },
+  {
+   "id": "length-str",
+   "op": "filter",
+   "name": "length",
+   "input": {
+    "value": {
+     "str": "abcd"
+    },
+    "args": []
+   },
+   "value": {
+    "num": [
+     4,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "length-list",
+   "op": "filter",
+   "name": "length",
+   "input": {
+    "value": {
+     "list": [
+      {
+       "num": [
+        1,
+        "int"
+       ]
+      },
+      {
+       "num": [
+        2,
+        "int"
+       ]
+      },
+      {
+       "num": [
+        3,
+        "int"
+       ]
+      }
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "num": [
+     3,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "length-dict",
+   "op": "filter",
+   "name": "length",
+   "input": {
+    "value": {
+     "dict": [
+      [
+       {
+        "str": "a"
+       },
+       {
+        "num": [
+         1,
+         "int"
+        ]
+       }
+      ]
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "num": [
+     1,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "length-int",
+   "op": "filter",
+   "name": "length",
+   "input": {
+    "value": {
+     "num": [
+      42,
+      "int"
+     ]
+    },
+    "args": []
+   },
+   "error": [
+    "TypeError",
+    "object of type 'int' has no len()"
+   ]
+  },
+  {
+   "id": "abs-neg",
+   "op": "filter",
+   "name": "abs",
+   "input": {
+    "value": {
+     "num": [
+      -3.5,
+      "float"
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "num": [
+     3.5,
+     "float"
+    ]
+   }
+  },
+  {
+   "id": "int-str",
+   "op": "filter",
+   "name": "int",
+   "input": {
+    "value": {
+     "str": "42"
+    },
+    "args": []
+   },
+   "value": {
+    "num": [
+     42,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "int-float-str",
+   "op": "filter",
+   "name": "int",
+   "input": {
+    "value": {
+     "str": "42.23"
+    },
+    "args": []
+   },
+   "value": {
+    "num": [
+     42,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "int-hex",
+   "op": "filter",
+   "name": "int",
+   "input": {
+    "value": {
+     "str": "0x1a"
+    },
+    "args": [
+     {
+      "num": [
+       0,
+       "int"
+      ]
+     },
+     {
+      "num": [
+       16,
+       "int"
+      ]
+     }
+    ]
+   },
+   "value": {
+    "num": [
+     26,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "int-octal",
+   "op": "filter",
+   "name": "int",
+   "input": {
+    "value": {
+     "str": "0o777"
+    },
+    "args": []
+   },
+   "value": {
+    "num": [
+     0,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "int-bin",
+   "op": "filter",
+   "name": "int",
+   "input": {
+    "value": {
+     "str": "0b101"
+    },
+    "args": [
+     {
+      "num": [
+       0,
+       "int"
+      ]
+     },
+     {
+      "num": [
+       2,
+       "int"
+      ]
+     }
+    ]
+   },
+   "value": {
+    "num": [
+     5,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "int-underscore",
+   "op": "filter",
+   "name": "int",
+   "input": {
+    "value": {
+     "str": "1_2"
+    },
+    "args": []
+   },
+   "value": {
+    "num": [
+     12,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "int-bad-underscore",
+   "op": "filter",
+   "name": "int",
+   "input": {
+    "value": {
+     "str": "1__2"
+    },
+    "args": []
+   },
+   "value": {
+    "num": [
+     0,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "int-ws",
+   "op": "filter",
+   "name": "int",
+   "input": {
+    "value": {
+     "str": " 7 "
+    },
+    "args": []
+   },
+   "value": {
+    "num": [
+     7,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "int-float",
+   "op": "filter",
+   "name": "int",
+   "input": {
+    "value": {
+     "num": [
+      42.9,
+      "float"
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "num": [
+     42,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "int-nan",
+   "op": "filter",
+   "name": "int",
+   "input": {
+    "value": {
+     "num": [
+      "nan",
+      "float"
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "num": [
+     0,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "float-str",
+   "op": "filter",
+   "name": "float",
+   "input": {
+    "value": {
+     "str": "3.5"
+    },
+    "args": []
+   },
+   "value": {
+    "num": [
+     3.5,
+     "float"
+    ]
+   }
+  },
+  {
+   "id": "float-bad",
+   "op": "filter",
+   "name": "float",
+   "input": {
+    "value": {
+     "str": "x"
+    },
+    "args": []
+   },
+   "value": {
+    "num": [
+     0.0,
+     "float"
+    ]
+   }
+  },
+  {
+   "id": "default-undef-x",
+   "op": "filter",
+   "name": "default",
+   "input": {
+    "value": {
+     "undefined": {
+      "message": "'u' is undefined",
+      "str": ""
+     }
+    },
+    "args": [
+     {
+      "str": "dv"
+     }
+    ]
+   },
+   "value": {
+    "str": "dv"
+   }
+  },
+  {
+   "id": "default-empty-bool",
+   "op": "filter",
+   "name": "default",
+   "input": {
+    "value": {
+     "str": ""
+    },
+    "args": [
+     {
+      "str": "dv"
+     },
+     {
+      "bool": true
+     }
+    ]
+   },
+   "value": {
+    "str": "dv"
+   }
+  },
+  {
+   "id": "default-empty",
+   "op": "filter",
+   "name": "default",
+   "input": {
+    "value": {
+     "str": ""
+    },
+    "args": [
+     {
+      "str": "dv"
+     }
+    ]
+   },
+   "value": {
+    "str": ""
+   }
+  },
+  {
+   "id": "join-list",
+   "op": "filter",
+   "name": "join",
+   "input": {
+    "value": {
+     "list": [
+      {
+       "num": [
+        1,
+        "int"
+       ]
+      },
+      {
+       "num": [
+        2,
+        "int"
+       ]
+      },
+      {
+       "num": [
+        3,
+        "int"
+       ]
+      }
+     ]
+    },
+    "args": [
+     {
+      "str": "|"
+     }
+    ]
+   },
+   "value": {
+    "str": "1|2|3"
+   }
+  },
+  {
+   "id": "join-str",
+   "op": "filter",
+   "name": "join",
+   "input": {
+    "value": {
+     "str": "abc"
+    },
+    "args": [
+     {
+      "str": "-"
+     }
+    ]
+   },
+   "value": {
+    "str": "a-b-c"
+   }
+  },
+  {
+   "id": "join-dict",
+   "op": "filter",
+   "name": "join",
+   "input": {
+    "value": {
+     "dict": [
+      [
+       {
+        "str": "a"
+       },
+       {
+        "num": [
+         1,
+         "int"
+        ]
+       }
+      ],
+      [
+       {
+        "str": "b"
+       },
+       {
+        "num": [
+         2,
+         "int"
+        ]
+       }
+      ]
+     ]
+    },
+    "args": [
+     {
+      "str": "+"
+     }
+    ]
+   },
+   "value": {
+    "str": "a+b"
+   }
+  },
+  {
+   "id": "join-attr",
+   "op": "filter",
+   "name": "join",
+   "input": {
+    "value": {
+     "list": [
+      {
+       "dict": [
+        [
+         {
+          "str": "n"
+         },
+         {
+          "str": "x"
+         }
+        ]
+       ]
+      },
+      {
+       "dict": [
+        [
+         {
+          "str": "n"
+         },
+         {
+          "str": "y"
+         }
+        ]
+       ]
+      }
+     ]
+    },
+    "args": [
+     {
+      "str": ","
+     },
+     {
+      "str": "n"
+     }
+    ]
+   },
+   "value": {
+    "str": "x,y"
+   }
+  },
+  {
+   "id": "replace-plain",
+   "op": "filter",
+   "name": "replace",
+   "input": {
+    "value": {
+     "str": "aaa"
+    },
+    "args": [
+     {
+      "str": "a"
+     },
+     {
+      "str": "b"
+     }
+    ]
+   },
+   "value": {
+    "str": "bbb"
+   }
+  },
+  {
+   "id": "replace-count",
+   "op": "filter",
+   "name": "replace",
+   "input": {
+    "value": {
+     "str": "aaaa"
+    },
+    "args": [
+     {
+      "str": "a"
+     },
+     {
+      "str": "b"
+     },
+     {
+      "num": [
+       2,
+       "int"
+      ]
+     }
+    ]
+   },
+   "value": {
+    "str": "bbaa"
+   }
+  },
+  {
+   "id": "first-list",
+   "op": "filter",
+   "name": "first",
+   "input": {
+    "value": {
+     "list": [
+      {
+       "num": [
+        3,
+        "int"
+       ]
+      },
+      {
+       "num": [
+        4,
+        "int"
+       ]
+      }
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "num": [
+     3,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "first-empty",
+   "op": "filter",
+   "name": "first",
+   "input": {
+    "value": {
+     "list": []
+    },
+    "args": []
+   },
+   "value": {
+    "undefined": {
+     "message": "No first item, sequence was empty.",
+     "str": ""
+    }
+   }
+  },
+  {
+   "id": "last-list",
+   "op": "filter",
+   "name": "last",
+   "input": {
+    "value": {
+     "list": [
+      {
+       "num": [
+        3,
+        "int"
+       ]
+      },
+      {
+       "num": [
+        4,
+        "int"
+       ]
+      }
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "num": [
+     4,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "last-empty",
+   "op": "filter",
+   "name": "last",
+   "input": {
+    "value": {
+     "list": []
+    },
+    "args": []
+   },
+   "value": {
+    "undefined": {
+     "message": "No last item, sequence was empty.",
+     "str": ""
+    }
+   }
+  },
+  {
+   "id": "reverse-str",
+   "op": "filter",
+   "name": "reverse",
+   "input": {
+    "value": {
+     "str": "abc"
+    },
+    "args": []
+   },
+   "value": {
+    "str": "cba"
+   }
+  },
+  {
+   "id": "reverse-list",
+   "op": "filter",
+   "name": "reverse",
+   "input": {
+    "value": {
+     "list": [
+      {
+       "num": [
+        1,
+        "int"
+       ]
+      },
+      {
+       "num": [
+        2,
+        "int"
+       ]
+      }
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "list": [
+     {
+      "num": [
+       2,
+       "int"
+      ]
+     },
+     {
+      "num": [
+       1,
+       "int"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "list-of",
+   "op": "filter",
+   "name": "list",
+   "input": {
+    "value": {
+     "dict": [
+      [
+       {
+        "str": "k"
+       },
+       {
+        "num": [
+         1,
+         "int"
+        ]
+       }
+      ]
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "list": [
+     {
+      "str": "k"
+     }
+    ]
+   }
+  },
+  {
+   "id": "sort-plain",
+   "op": "filter",
+   "name": "sort",
+   "input": {
+    "value": {
+     "list": [
+      {
+       "num": [
+        3,
+        "int"
+       ]
+      },
+      {
+       "num": [
+        1,
+        "int"
+       ]
+      },
+      {
+       "num": [
+        2,
+        "int"
+       ]
+      }
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "list": [
+     {
+      "num": [
+       1,
+       "int"
+      ]
+     },
+     {
+      "num": [
+       2,
+       "int"
+      ]
+     },
+     {
+      "num": [
+       3,
+       "int"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "sort-ci-str",
+   "op": "filter",
+   "name": "sort",
+   "input": {
+    "value": {
+     "list": [
+      {
+       "str": "b"
+      },
+      {
+       "str": "A"
+      },
+      {
+       "str": "a"
+      }
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "list": [
+     {
+      "str": "A"
+     },
+     {
+      "str": "a"
+     },
+     {
+      "str": "b"
+     }
+    ]
+   }
+  },
+  {
+   "id": "sort-cs-str",
+   "op": "filter",
+   "name": "sort",
+   "input": {
+    "value": {
+     "list": [
+      {
+       "str": "b"
+      },
+      {
+       "str": "A"
+      },
+      {
+       "str": "a"
+      }
+     ]
+    },
+    "args": [
+     {
+      "bool": false
+     },
+     {
+      "bool": true
+     }
+    ]
+   },
+   "value": {
+    "list": [
+     {
+      "str": "A"
+     },
+     {
+      "str": "a"
+     },
+     {
+      "str": "b"
+     }
+    ]
+   }
+  },
+  {
+   "id": "sort-reverse",
+   "op": "filter",
+   "name": "sort",
+   "input": {
+    "value": {
+     "list": [
+      {
+       "num": [
+        1,
+        "int"
+       ]
+      },
+      {
+       "num": [
+        3,
+        "int"
+       ]
+      },
+      {
+       "num": [
+        2,
+        "int"
+       ]
+      }
+     ]
+    },
+    "args": [
+     {
+      "bool": true
+     }
+    ]
+   },
+   "value": {
+    "list": [
+     {
+      "num": [
+       3,
+       "int"
+      ]
+     },
+     {
+      "num": [
+       2,
+       "int"
+      ]
+     },
+     {
+      "num": [
+       1,
+       "int"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "sort-attr",
+   "op": "filter",
+   "name": "sort",
+   "input": {
+    "value": {
+     "list": [
+      {
+       "dict": [
+        [
+         {
+          "str": "n"
+         },
+         {
+          "num": [
+           2,
+           "int"
+          ]
+         }
+        ]
+       ]
+      },
+      {
+       "dict": [
+        [
+         {
+          "str": "n"
+         },
+         {
+          "num": [
+           1,
+           "int"
+          ]
+         }
+        ]
+       ]
+      }
+     ]
+    },
+    "args": [
+     {
+      "bool": false
+     },
+     {
+      "bool": false
+     },
+     {
+      "str": "n"
+     }
+    ]
+   },
+   "value": {
+    "list": [
+     {
+      "dict": [
+       [
+        {
+         "str": "n"
+        },
+        {
+         "num": [
+          1,
+          "int"
+         ]
+        }
+       ]
+      ]
+     },
+     {
+      "dict": [
+       [
+        {
+         "str": "n"
+        },
+        {
+         "num": [
+          2,
+          "int"
+         ]
+        }
+       ]
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "escape-str",
+   "op": "filter",
+   "name": "escape",
+   "input": {
+    "value": {
+     "str": "<b>&"
+    },
+    "args": []
+   },
+   "value": {
+    "markup": "&lt;b&gt;&amp;"
+   }
+  },
+  {
+   "id": "escape-none",
+   "op": "filter",
+   "name": "escape",
+   "input": {
+    "value": {
+     "none": true
+    },
+    "args": []
+   },
+   "value": {
+    "markup": "None"
+   }
+  },
+  {
+   "id": "string-filter",
+   "op": "filter",
+   "name": "string",
+   "input": {
+    "value": {
+     "undefined": {
+      "message": "'u' is undefined",
+      "str": ""
+     }
+    },
+    "args": []
+   },
+   "value": {
+    "str": ""
+   }
+  },
+  {
+   "id": "abs-undef",
+   "op": "filter",
+   "name": "abs",
+   "input": {
+    "value": {
+     "undefined": {
+      "message": "'u' is undefined",
+      "str": ""
+     }
+    },
+    "args": []
+   },
+   "error": [
+    "TypeError",
+    "bad operand type for abs(): 'Undefined'"
+   ]
+  },
+  {
+   "id": "int-undef",
+   "op": "filter",
+   "name": "int",
+   "input": {
+    "value": {
+     "undefined": {
+      "message": "'u' is undefined",
+      "str": ""
+     }
+    },
+    "args": []
+   },
+   "error": [
+    "UndefinedError",
+    "'u' is undefined"
+   ]
+  },
+  {
+   "id": "float-undef",
+   "op": "filter",
+   "name": "float",
+   "input": {
+    "value": {
+     "undefined": {
+      "message": "'u' is undefined",
+      "str": ""
+     }
+    },
+    "args": []
+   },
+   "error": [
+    "UndefinedError",
+    "'u' is undefined"
+   ]
+  },
+  {
+   "id": "join-auto-plain",
+   "op": "evalFilter",
+   "name": "join",
+   "input": {
+    "args": [
+     {
+      "list": [
+       {
+        "str": "<a>"
+       },
+       {
+        "str": "<b>"
+       }
+      ]
+     },
+     {
+      "str": "<hr>"
+     }
+    ]
+   },
+   "value": {
+    "str": "<a><hr><b>"
+   }
+  },
+  {
+   "id": "join-auto-markup-sep",
+   "op": "evalFilter",
+   "name": "join",
+   "input": {
+    "args": [
+     {
+      "list": [
+       {
+        "str": "a"
+       },
+       {
+        "str": "b"
+       }
+      ]
+     },
+     {
+      "markup": "&x"
+     }
+    ]
+   },
+   "value": {
+    "markup": "a&xb"
+   }
+  },
+  {
+   "id": "join-auto-markup-item",
+   "op": "evalFilter",
+   "name": "join",
+   "input": {
+    "args": [
+     {
+      "list": [
+       {
+        "markup": "<m>"
+       },
+       {
+        "str": "<e>"
+       }
+      ]
+     },
+     {
+      "str": "<hr>"
+     }
+    ]
+   },
+   "value": {
+    "markup": "<m>&lt;hr&gt;&lt;e&gt;"
+   }
+  },
+  {
+   "id": "replace-auto",
+   "op": "evalFilter",
+   "name": "replace",
+   "input": {
+    "args": [
+     {
+      "str": "aaa"
+     },
+     {
+      "str": "a"
+     },
+     {
+      "str": "<x>"
+     }
+    ]
+   },
+   "value": {
+    "str": "<x><x><x>"
+   }
+  },
+  {
+   "id": "map-noctx",
+   "op": "filter",
+   "name": "map",
+   "input": {
+    "value": {
+     "list": [
+      {
+       "num": [
+        1,
+        "int"
+       ]
+      }
+     ]
+    },
+    "args": [
+     {
+      "str": "string"
+     }
+    ]
+   },
+   "error": [
+    "TemplateRuntimeError",
+    "Attempted to invoke a context filter without context."
+   ]
+  },
+  {
+   "id": "select-noctx",
+   "op": "filter",
+   "name": "select",
+   "input": {
+    "value": {
+     "list": [
+      {
+       "num": [
+        1,
+        "int"
+       ]
+      }
+     ]
+    },
+    "args": [
+     {
+      "str": "odd"
+     }
+    ]
+   },
+   "error": [
+    "TemplateRuntimeError",
+    "Attempted to invoke a context filter without context."
+   ]
+  },
+  {
+   "id": "odd-3",
+   "op": "test",
+   "name": "odd",
+   "input": {
+    "value": {
+     "num": [
+      3,
+      "int"
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "odd-neg",
+   "op": "test",
+   "name": "odd",
+   "input": {
+    "value": {
+     "num": [
+      -3,
+      "int"
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "even-4",
+   "op": "test",
+   "name": "even",
+   "input": {
+    "value": {
+     "num": [
+      4,
+      "int"
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "divby-9-3",
+   "op": "test",
+   "name": "divisibleby",
+   "input": {
+    "value": {
+     "num": [
+      9,
+      "int"
+     ]
+    },
+    "args": [
+     {
+      "num": [
+       3,
+       "int"
+      ]
+     }
+    ]
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "defined-x",
+   "op": "test",
+   "name": "defined",
+   "input": {
+    "value": {
+     "num": [
+      1,
+      "int"
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "defined-u",
+   "op": "test",
+   "name": "defined",
+   "input": {
+    "value": {
+     "undefined": {
+      "message": "'u' is undefined",
+      "str": ""
+     }
+    },
+    "args": []
+   },
+   "value": {
+    "bool": false
+   }
+  },
+  {
+   "id": "undefined-u",
+   "op": "test",
+   "name": "undefined",
+   "input": {
+    "value": {
+     "undefined": {
+      "message": "'u' is undefined",
+      "str": ""
+     }
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "none-none",
+   "op": "test",
+   "name": "none",
+   "input": {
+    "value": {
+     "none": true
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "none-zero",
+   "op": "test",
+   "name": "none",
+   "input": {
+    "value": {
+     "num": [
+      0,
+      "int"
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "bool": false
+   }
+  },
+  {
+   "id": "boolean-t",
+   "op": "test",
+   "name": "boolean",
+   "input": {
+    "value": {
+     "bool": true
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "boolean-1",
+   "op": "test",
+   "name": "boolean",
+   "input": {
+    "value": {
+     "num": [
+      1,
+      "int"
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "bool": false
+   }
+  },
+  {
+   "id": "false-f",
+   "op": "test",
+   "name": "false",
+   "input": {
+    "value": {
+     "bool": false
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "true-t",
+   "op": "test",
+   "name": "true",
+   "input": {
+    "value": {
+     "bool": true
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "integer-3",
+   "op": "test",
+   "name": "integer",
+   "input": {
+    "value": {
+     "num": [
+      3,
+      "int"
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "integer-3.5",
+   "op": "test",
+   "name": "integer",
+   "input": {
+    "value": {
+     "num": [
+      3.5,
+      "float"
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "bool": false
+   }
+  },
+  {
+   "id": "float-3.0",
+   "op": "test",
+   "name": "float",
+   "input": {
+    "value": {
+     "num": [
+      3.0,
+      "float"
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "float-3",
+   "op": "test",
+   "name": "float",
+   "input": {
+    "value": {
+     "num": [
+      3,
+      "int"
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "bool": false
+   }
+  },
+  {
+   "id": "lower-l",
+   "op": "test",
+   "name": "lower",
+   "input": {
+    "value": {
+     "str": "abc"
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "lower-mixed",
+   "op": "test",
+   "name": "lower",
+   "input": {
+    "value": {
+     "str": "aBc"
+    },
+    "args": []
+   },
+   "value": {
+    "bool": false
+   }
+  },
+  {
+   "id": "upper-u",
+   "op": "test",
+   "name": "upper",
+   "input": {
+    "value": {
+     "str": "ABC"
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "string-s",
+   "op": "test",
+   "name": "string",
+   "input": {
+    "value": {
+     "str": "x"
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "mapping-d",
+   "op": "test",
+   "name": "mapping",
+   "input": {
+    "value": {
+     "dict": [
+      [
+       {
+        "str": "a"
+       },
+       {
+        "num": [
+         1,
+         "int"
+        ]
+       }
+      ]
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "number-1",
+   "op": "test",
+   "name": "number",
+   "input": {
+    "value": {
+     "num": [
+      1,
+      "int"
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "number-t",
+   "op": "test",
+   "name": "number",
+   "input": {
+    "value": {
+     "bool": true
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "sequence-l",
+   "op": "test",
+   "name": "sequence",
+   "input": {
+    "value": {
+     "list": [
+      {
+       "num": [
+        1,
+        "int"
+       ]
+      }
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "sequence-i",
+   "op": "test",
+   "name": "sequence",
+   "input": {
+    "value": {
+     "num": [
+      1,
+      "int"
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "bool": false
+   }
+  },
+  {
+   "id": "iterable-d",
+   "op": "test",
+   "name": "iterable",
+   "input": {
+    "value": {
+     "dict": [
+      [
+       {
+        "str": "a"
+       },
+       {
+        "num": [
+         1,
+         "int"
+        ]
+       }
+      ]
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "iterable-i",
+   "op": "test",
+   "name": "iterable",
+   "input": {
+    "value": {
+     "num": [
+      1,
+      "int"
+     ]
+    },
+    "args": []
+   },
+   "value": {
+    "bool": false
+   }
+  },
+  {
+   "id": "sameas-f",
+   "op": "test",
+   "name": "sameas",
+   "input": {
+    "value": {
+     "bool": false
+    },
+    "args": [
+     {
+      "bool": false
+     }
+    ]
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "escaped-m",
+   "op": "test",
+   "name": "escaped",
+   "input": {
+    "value": {
+     "markup": "x"
+    },
+    "args": []
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "in-list",
+   "op": "test",
+   "name": "in",
+   "input": {
+    "value": {
+     "num": [
+      1,
+      "int"
+     ]
+    },
+    "args": [
+     {
+      "list": [
+       {
+        "num": [
+         1,
+         "int"
+        ]
+       },
+       {
+        "num": [
+         2,
+         "int"
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "in-str",
+   "op": "test",
+   "name": "in",
+   "input": {
+    "value": {
+     "str": "a"
+    },
+    "args": [
+     {
+      "str": "abc"
+     }
+    ]
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "in-dict",
+   "op": "test",
+   "name": "in",
+   "input": {
+    "value": {
+     "str": "a"
+    },
+    "args": [
+     {
+      "dict": [
+       [
+        {
+         "str": "a"
+        },
+        {
+         "num": [
+          1,
+          "int"
+         ]
+        }
+       ]
+      ]
+     }
+    ]
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "eq-1",
+   "op": "test",
+   "name": "==",
+   "input": {
+    "value": {
+     "num": [
+      1,
+      "int"
+     ]
+    },
+    "args": [
+     {
+      "num": [
+       1,
+       "int"
+      ]
+     }
+    ]
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "eq-t1",
+   "op": "test",
+   "name": "==",
+   "input": {
+    "value": {
+     "bool": true
+    },
+    "args": [
+     {
+      "num": [
+       1,
+       "int"
+      ]
+     }
+    ]
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "ne-str",
+   "op": "test",
+   "name": "!=",
+   "input": {
+    "value": {
+     "str": "a"
+    },
+    "args": [
+     {
+      "num": [
+       1,
+       "int"
+      ]
+     }
+    ]
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "gt-2",
+   "op": "test",
+   "name": ">",
+   "input": {
+    "value": {
+     "num": [
+      2,
+      "int"
+     ]
+    },
+    "args": [
+     {
+      "num": [
+       1,
+       "int"
+      ]
+     }
+    ]
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "ge-eq",
+   "op": "test",
+   "name": ">=",
+   "input": {
+    "value": {
+     "num": [
+      1,
+      "int"
+     ]
+    },
+    "args": [
+     {
+      "num": [
+       1,
+       "int"
+      ]
+     }
+    ]
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "lt-1",
+   "op": "test",
+   "name": "<",
+   "input": {
+    "value": {
+     "num": [
+      1,
+      "int"
+     ]
+    },
+    "args": [
+     {
+      "num": [
+       2,
+       "int"
+      ]
+     }
+    ]
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "le-eq",
+   "op": "test",
+   "name": "<=",
+   "input": {
+    "value": {
+     "num": [
+      1,
+      "int"
+     ]
+    },
+    "args": [
+     {
+      "num": [
+       1,
+       "int"
+      ]
+     }
+    ]
+   },
+   "value": {
+    "bool": true
+   }
+  },
+  {
+   "id": "gt-str-int",
+   "op": "test",
+   "name": ">",
+   "input": {
+    "value": {
+     "str": "a"
+    },
+    "args": [
+     {
+      "num": [
+       1,
+       "int"
+      ]
+     }
+    ]
+   },
+   "error": [
+    "TypeError",
+    "'>' not supported between instances of 'str' and 'int'"
+   ]
+  },
+  {
+   "id": "ge-str-int",
+   "op": "test",
+   "name": ">=",
+   "input": {
+    "value": {
+     "str": "a"
+    },
+    "args": [
+     {
+      "num": [
+       1,
+       "int"
+      ]
+     }
+    ]
+   },
+   "error": [
+    "TypeError",
+    "'>=' not supported between instances of 'str' and 'int'"
+   ]
+  },
+  {
+   "id": "gi-dict",
+   "op": "getitem",
+   "obj": {
+    "dict": [
+     [
+      {
+       "str": "a"
+      },
+      {
+       "num": [
+        1,
+        "int"
+       ]
+      }
+     ]
+    ]
+   },
+   "arg": {
+    "str": "a"
+   },
+   "value": {
+    "num": [
+     1,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "gi-dict-miss",
+   "op": "getitem",
+   "obj": {
+    "dict": [
+     [
+      {
+       "str": "a"
+      },
+      {
+       "num": [
+        1,
+        "int"
+       ]
+      }
+     ]
+    ]
+   },
+   "arg": {
+    "str": "b"
+   },
+   "value": {
+    "undefined": {
+     "message": "'dict object' has no attribute 'b'",
+     "str": ""
+    }
+   }
+  },
+  {
+   "id": "gi-list-int",
+   "op": "getitem",
+   "obj": {
+    "list": [
+     {
+      "num": [
+       5,
+       "int"
+      ]
+     },
+     {
+      "num": [
+       6,
+       "int"
+      ]
+     }
+    ]
+   },
+   "arg": {
+    "num": [
+     1,
+     "int"
+    ]
+   },
+   "value": {
+    "num": [
+     6,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "gi-list-str",
+   "op": "getitem",
+   "obj": {
+    "list": [
+     {
+      "num": [
+       5,
+       "int"
+      ]
+     },
+     {
+      "num": [
+       6,
+       "int"
+      ]
+     }
+    ]
+   },
+   "arg": {
+    "str": "0"
+   },
+   "value": {
+    "undefined": {
+     "message": "'list object' has no attribute '0'",
+     "str": ""
+    }
+   }
+  },
+  {
+   "id": "gi-list-oob",
+   "op": "getitem",
+   "obj": {
+    "list": [
+     {
+      "num": [
+       5,
+       "int"
+      ]
+     },
+     {
+      "num": [
+       6,
+       "int"
+      ]
+     }
+    ]
+   },
+   "arg": {
+    "num": [
+     9,
+     "int"
+    ]
+   },
+   "value": {
+    "undefined": {
+     "message": "list object has no element 9",
+     "str": ""
+    }
+   }
+  },
+  {
+   "id": "gi-list-neg",
+   "op": "getitem",
+   "obj": {
+    "list": [
+     {
+      "num": [
+       5,
+       "int"
+      ]
+     },
+     {
+      "num": [
+       6,
+       "int"
+      ]
+     }
+    ]
+   },
+   "arg": {
+    "num": [
+     -1,
+     "int"
+    ]
+   },
+   "value": {
+    "num": [
+     6,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "gi-list-neg-oob",
+   "op": "getitem",
+   "obj": {
+    "list": [
+     {
+      "num": [
+       5,
+       "int"
+      ]
+     },
+     {
+      "num": [
+       6,
+       "int"
+      ]
+     }
+    ]
+   },
+   "arg": {
+    "num": [
+     -9,
+     "int"
+    ]
+   },
+   "value": {
+    "undefined": {
+     "message": "list object has no element -9",
+     "str": ""
+    }
+   }
+  },
+  {
+   "id": "ga-dict",
+   "op": "getattr",
+   "obj": {
+    "dict": [
+     [
+      {
+       "str": "a"
+      },
+      {
+       "num": [
+        1,
+        "int"
+       ]
+      }
+     ]
+    ]
+   },
+   "arg": {
+    "str": "a"
+   },
+   "value": {
+    "num": [
+     1,
+     "int"
+    ]
+   }
+  },
+  {
+   "id": "tpl-map",
+   "op": "template",
+   "src": "{{ ['a','b']|map('upper')|join(',') }}",
+   "value": {
+    "str": "A,B"
+   }
+  },
+  {
+   "id": "tpl-select",
+   "op": "template",
+   "src": "{{ [1,2,3,4]|select('odd')|join(',') }}",
+   "value": {
+    "str": "1,3"
+   }
+  },
+  {
+   "id": "tpl-reject",
+   "op": "template",
+   "src": "{{ [1,2,3,4]|reject('odd')|join(',') }}",
+   "value": {
+    "str": "2,4"
+   }
+  },
+  {
+   "id": "tpl-selectattr",
+   "op": "template",
+   "src": "{{ [{'a':1},{'a':0}]|selectattr('a')|list|length }}",
+   "value": {
+    "str": "1"
+   }
+  },
+  {
+   "id": "tpl-sort-attr",
+   "op": "template",
+   "src": "{{ [{'n':2},{'n':1}]|sort(attribute='n')|map(attribute='n')|join('-') }}",
+   "value": {
+    "str": "1-2"
+   }
+  },
+  {
+   "id": "tpl-default",
+   "op": "template",
+   "src": "{{ nothere|default('d!') }}",
+   "value": {
+    "str": "d!"
+   }
+  },
+  {
+   "id": "tpl-undef-print",
+   "op": "template",
+   "src": "[{{ nope }}]",
+   "value": {
+    "str": "[]"
+   }
+  },
+  {
+   "id": "tpl-strict-print",
+   "op": "template",
+   "src": "[{{ nope }}]",
+   "error": [
+    "UndefinedError",
+    "'nope' is undefined"
+   ]
+  },
+  {
+   "id": "tpl-debug-print",
+   "op": "template",
+   "src": "[{{ nope }}]",
+   "value": {
+    "str": "[{{ nope }}]"
+   }
+  },
+  {
+   "id": "tpl-chain-print",
+   "op": "template",
+   "src": "[{{ a.b.c }}]",
+   "value": {
+    "str": "[]"
+   }
+  }
+ ]
+}

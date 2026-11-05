@@ -259,12 +259,16 @@ PLAN_D_PARALLEL.md for file ownership, conflict matrix and waves.
       evidence.
 
 ## Phase E -- JavaScript / wasm packaging
-* [ ] slice E0 (PLAN_JS.md): JS scaffold + value bridge.  Status 2026-11-02
-      (in progress): `js/package.json` and `js/src/values.mjs` written (the
-      truncated file left by the interrupted session repaired: reprElement,
-      objectTypeRepr, isPlainObjectish, Undefined class close); parses clean
-      under node --check.  Not started: filters.mjs, tests.mjs,
-      environment.mjs, index.mjs, js/test/ suites, golden-value script.
+* [ ] slice E0 (PLAN_JS.md): JS scaffold + value bridge.  Status
+      2026-11-04 (in progress, crash-recovery sweep completed what survived):
+      the interrupted session's pending `js/src/values.mjs` edit landed with
+      filters, tests registry, environment shell, index surface, node test
+      suites and golden-value generator; bridge rules replay against CPython-
+      captured goldens including negative list subscripts (gi-list-neg/
+      gi-list-neg-oob: python getitem is obj[argument], so JS tryItem now
+      wraps negatives as the engine does).  Node suite green at 156.
+      Remaining before E0 closes: pass-kind and lookup-matrix rule suites
+      beyond what golden replays already cover.
 * [ ] split pyo3 glue behind cargo feature `python`; core API becomes pure rust
       (`lexer::tokenize`, `parser::parse` -> AST enum, `render(cfg, ast, ctx)`)
 * [ ] `jutsu-wasm` crate: wasm-bindgen wrapper exposing compile/render with a

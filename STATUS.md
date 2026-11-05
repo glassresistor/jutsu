@@ -542,3 +542,28 @@ left inside the repo (moved to scratch/junk-2026-11-02/, not deleted).
   node --check.  Filters, tests registry, environment scaffold, index and
   the js/test/ suites are not started; nothing in js/ is settled behavior
   yet -- no E0 rule is pinned until its differential test lands.
+
+## Working state (2026-11-04): slice E0 wrap-up after the second crash
+
+A session crashed again while extending `js/src/values.mjs` with bridge
+helpers; this sweep commits what survived and pins one real divergence found
+while checking it.  Landed here: the pending values diff (pyLen/pyIter/
+pyEq/pyCompare/pyContains/reprElement family plus type-mapping notes), all
+the js files recovered from before them (`filters`, `tests`, `environment`,
+`index`, README, test suites and golden generator) verified to parse clean;
+node --test green at 156 including four direct environment-shell rule tests
+(constructor validation, undefined-factory selection by name/class/subclass,
+autoescape callable plumbing, decline-not-guess compile/render/attachBackend
+contract per decision D-E3).
+
+Measured against engine truth: python `Environment.getitem` is literally
+`obj[argument]`, so negative subscripts wrap on lists; JS tryItem rejected
+them outright -- repaired and pinned as new golden cases gi-list-neg /
+gi-list-neg-oob captured fresh from the real engine.  Golden file regenerates
+deterministically (141 cases).
+
+Deliberately NOT settled: pass-kind and lookup-matrix rule suites beyond what
+golden replays cover were in flight when this session's own writes began
+dropping mid-line; they are left out rather than committed half-written, so
+later sessions must treat E0 as still open (TODO.md Phase E carries the
+status).  The inert placeholder js/test/debug_int.mjs stays untracked.
