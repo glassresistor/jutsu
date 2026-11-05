@@ -15,6 +15,14 @@ requires-python = ">=3.10"
 dependencies = ["MarkupSafe>=3.0"]
 
 [tool.pytest.ini_options]
+# anyio < 4.16 imports the deprecated `_pytest.python.CallSpec2` alias from its
+# pytest plugin, which `filterwarnings = error` turns into a hard crash under
+# pytest >= 9.2.  Ignore that deprecation so old transitive copies of anyio
+# (trio pulls it in) cannot break collection; drop this once trio pins the
+# fixed anyio release.
+filterwarnings = [
+    "error",
+    "ignore::pytest.PytestRemovedIn10Warning",
+]
 testpaths = ["tests"]
 pythonpath = ["src"]
-filterwarnings = ["error"]

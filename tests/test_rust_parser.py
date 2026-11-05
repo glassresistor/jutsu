@@ -8,7 +8,6 @@ import random
 
 import pytest
 
-from jutsu import _jutsu
 from jutsu import nodes
 from jutsu import rust_parse
 from jutsu.environment import Environment
