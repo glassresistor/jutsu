@@ -24,8 +24,9 @@ the existing Jinja2 extensions and ecosystem.
 | Rust lexer (`crates/jutsu-core/src/lexer.rs`) | **done and wired into `Lexer.tokeniter`** |
 | Rust parser (`crates/jutsu-core/src/parser.rs`) | **done and wired into `Parser.parse`** (default on; `JUTSU_RUST_PARSER=0` switches back) |
 | Packaging (maturin wheel with rust core) | done (`maturin build -r -m crates/jutsu-core/Cargo.toml`) |
-| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | **slice C-v2/C-v3a/C-v3b/C-v4a/C-v4b: statements, scoping and macros/call blocks evaluate fully in rust** -- if/elif/else, for (incl. `if=` test filters, else branches, recursive loops with `loop()` recursion, full LoopContext features), set/set-block(+filter), filter blocks, with, namespace refs, `{% macro %}` / `{% call %}` with caller/kwargs/varargs closures; compiled-engine scope semantics reproduced (slot frames, alias-copy on store, per-scope resolve loads, root writeback+exported_vars). Slice C-v4a adds plain block inheritance: `{% extends %}` chains, block invocation with the code generator's runtime guards (`extends_so_far`/`has_known_extends`), `super()` through python's own `Context.super` and `BlockReference`, `self` via `TemplateReference`, required blocks. Slice C-v4b closes scoped blocks: derived eval contexts dumped from the live scope chain at the invocation site through python's own `Context.derived`; includes/imports stay deferred (slice C-v5). Not wired into `Template.render` yet; validated differentially incl. exception type/message parity |
-| Code generator / runtime | still python (next targets: block inheritance, includes/imports) |
+| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | **done through slice C-v6** -- statements/scoping/macros/call blocks (C-v2/C-v3a/C-v3b), plain block inheritance (C-v4a), scoped blocks via derived eval contexts (C-v4b), includes/imports with join-path/tname semantics (C-v5), autoescape/Markup/volatile regions with the compile-time fold graph (C-v6); per-source parsed-AST cache with cached failure handles (slice C-v7a). **Wired into `Template.render` behind `JUTSU_RUST_EVAL` (default off)**: slice C-v8a wiring landed -- rust `check_supported` serve verdict (scan + layout, refusing parse-error ASTs and Extends/Include/Import nodes), python-side `rust_eval.eligible` / `serve_verdict` / `render_served`, per-template verdict cached on `Template._rust_serve`, template source retention through `from_code`/loaders. Five known divergences remain under the flag before C-v8a closes (see Working state 2026-11-02) |
+| Code generator / runtime | still python by design: bytecode emission was rejected (`PLAN_C_DONE.md`); codegen stays reachable as the lazy fallback path on a decline verdict |
+| JS wrapper (`js/`, `@jutsu/core` scaffold, Phase E slice E0) | **in progress**: value bridge (`values.mjs`: Undefined family with python message shapes, Markup/escape/soft_str, truthiness/pyStr/len/iter/eq/compare/contains rules, type mapping notes), ported filters subset (`filters.mjs`) and tests registry (`tests.mjs`), `Environment` shell (`environment.mjs`: registration, undefined-factory selection by name/class/subclass, autoescape callable plumbing, getitem/getattr/callFilter/callTest, decline-not-guess compile/render/attachBackend per decision D-E3), public surface `index.mjs`; node:test suites plus a golden replay harness capturing CPython behavior (`scripts/js_golden.py` -> `js/test/golden.json`, 141 cases incl. negative list subscripts). No npm dependencies. Remaining before E0 closes: pass-kind and lookup-matrix rule suites beyond golden replays |
 
 The lexer port is validated three ways:
 
@@ -230,11 +231,20 @@ original seed-2 template plus fuzz seeds 1-3 x8k and the full suite.
    with differential validation against the python parser's node trees.
 2. **Runtime/interpreter**: a tree-walking evaluator in rust, first as a
    differential renderer used to validate against the python code path,
-   then as the default engine once filter/test parity is proven.
-3. **Extensions** (`i18n`, `autoescape`, `looplevel`): keep working through the
-   python layer; port the hot paths later.
-4. **JavaScript/wasm**: share `crates/jutsu-core` via wasm-bindgen once the core
-   API is decoupled from pyo3 (move pyo3 glue behind a cargo feature).
+   then as the default engine once filter/test parity is proven. Done through
+   slice C-v6 plus cache v7a; wiring v8a landed behind `JUTSU_RUST_EVAL`
+   (default off); remaining slices per PLAN_C_DONE.md: close v8a, cross-
+   template serving v8b, measurement + default flip v8c.
+3. **Extensions** (`loopcontrols`, `do`, `i18n`, `debug`): keep working through
+   the python layer (gating rule settled in D1: any extension contributing
+   tags/filter_stream/preprocess forces the python path); third-party compat
+   story settled in D2 (`docs/EXT_COMPAT.md`); loaders/bytecache audit (D3)
+   and `NativeEnvironment` exclusion (D4) open.
+4. **JavaScript/wasm**: scaffold landed in `js/` (slice E0: value bridge,
+   filters subset, tests registry, Environment shell; node suite green at
+   157 incl. golden replay); share `crates/jutsu-core` via wasm-bindgen once
+   the core API is decoupled from pyo3 (E1: move pyo3 glue behind a cargo
+   feature; E2 wasm crate; E3 packaging).
 
 ## Building
 
@@ -567,3 +577,27 @@ golden replays cover were in flight when this session's own writes began
 dropping mid-line; they are left out rather than committed half-written, so
 later sessions must treat E0 as still open (TODO.md Phase E carries the
 status).  The inert placeholder js/test/debug_int.mjs stays untracked.
+
+## Working state (2026-11-06): verification sweep and documentation refresh
+
+No code changed here; this sweep re-measures every board after two idle days
+and brings README.md / STATUS.md in line with the codebase, including `js/`
+(which the top status table had never described).
+
+* Tree clean at fdd055c; nothing half-committed was left behind.
+* Default python suite: **1036 passed** (~12 s).
+* cargo unit tests unchanged at **17**.
+* Full suite with `JUTSU_RUST_EVAL=1`: exactly the five known divergences
+  (5 failed, 1031 passed): `TestBug::test_pass_context_loop_vars` (KeyError),
+  `test_pass_context_in_blocks`, `test_pass_context_block_and_loop`
+  (AssertionError), `test_tests::test_multiple_tests`, and
+  `test_debug::test_runtime_error` -- identical to the counts recorded on
+  2026-11-02, so nothing drifted in between.
+* JS node suite: **157 passed** (`node --test js/test/` from the repo root;
+  one more passing test than the 156 recorded on 2026-11-04, all green).
+  The `js/test/debug_int.mjs` placeholder mentioned in the previous section
+  no longer exists on disk (removed by a later sweep); nothing is untracked.
+* Environment note for future sessions: the sandbox needs `trio` installed
+  (`tests/conftest.py` imports it) and PYTHONPATH must keep the
+  `.unsloth-packages` entries while adding `src` -- overwriting PYTHONPATH
+  wholesale breaks conftest collection.

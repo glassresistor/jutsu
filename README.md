@@ -7,10 +7,11 @@ in which the engine internals are being rewritten in Rust, while the Python pack
 keeps working with the existing Jinja2 extensions, loaders and ecosystem.
 
 > **Status: work in progress.** The lexer, parser and evaluator already run in
-> Rust; code generation stays Python. The evaluator is wired into
+> Rust; code generation stays Python by design. The evaluator is wired into
 > `Template.render` behind `JUTSU_RUST_EVAL` but not yet the default (slice
-> C-v8a in progress — see `PLAN_C_DONE.md`). Nothing here is installed or
-> published yet.
+> C-v8a wiring landed — see `PLAN_C_DONE.md`). A JavaScript scaffold for the
+> future `@jutsu/core` package lives in `js/` (slice E0). Nothing here is
+> installed or published yet.
 
 ## What it will be
 
@@ -60,8 +61,9 @@ loaders, `Undefined` / `StrictUndefined` / `ChainableUndefined` /
 | Rust lexer (`crates/jutsu-core/src/lexer.rs`) | **done**, wired into `Lexer.tokeniter` |
 | Rust parser (`crates/jutsu-core/src/parser.rs`) | **done**, default engine (`JUTSU_RUST_PARSER=0` to opt out) |
 | Packaging (maturin wheel with Rust core) | done |
-| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | expressions + statements + scoping + filter blocks + macros — done; wired into `Template.render` behind `JUTSU_RUST_EVAL` (**default off**, slice C-v8a in progress) |
+| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | **done through slice C-v6** (expressions, statements/scoping, filter blocks, macros/call blocks, block inheritance incl. scoped blocks, includes/imports, autoescape/Markup/volatile regions) plus the per-source AST cache (C-v7a); wired into `Template.render` behind `JUTSU_RUST_EVAL` (**default off**) — the C-v8a serve-decision machinery landed (rust `check_supported`, python-side eligibility predicate, per-template verdict cached on the template object); five known divergences remain under the flag before v8b/v8c |
 | Code generator / runtime | still Python by design: bytecode emission was rejected, and codegen stays reachable as the fallback path (`PLAN_C_DONE.md`) |
+| JS wrapper (`js/`, `@jutsu/core` scaffold) | **slice E0 in progress**: value bridge (Undefined family, Markup/escape, truthiness/str, len/iter/eq/compare/contains), ported filters subset, tests registry, `Environment` shell with decline-not-guess `compile()`/`render()` (`EngineUnavailable` until a backend attaches); node suite green at 157 with a CPython-captured golden replay harness (`js/test/golden.json`) |
 
 ### Performance evidence so far
 
@@ -123,9 +125,9 @@ Extensions gate the switch: any extension that contributes tags (i18n `trans`,
 |---|---|---|
 | **A** | Fork Jinja2 as `jutsu`; Rust lexer wired into `Lexer.tokeniter` | ✅ done |
 | **B** | Full expression + statement grammar in Rust; AST rebuilt via `ast_rebuild.py`; default flipped | ✅ done |
-| **C** | Compiler/evaluator: expressions → statements/scoping → filter blocks → macros → inheritance/includes | 🟨 in progress — evaluator done and wired behind `JUTSU_RUST_EVAL` (default off); remainder per `PLAN_C_DONE.md`: finish C-v8a, cross-template serving v8b, measurement + default flip v8c |
-| **D** | Extensions (`i18n`, `autoescape`, `looplevel`) running on the Rust path; `NativeEnvironment` parity | 🟨 in progress — D1 gating/fallback and D2 third-party extension compat landed; D3/D4 open |
-| **E** | Split pyo3 glue behind a cargo feature; ship `jutsu-wasm` / `@jutsu/core` for JavaScript | ⬜ open |
+| **C** | Compiler/evaluator: expressions → statements/scoping → filter blocks → macros → inheritance/includes/autoescape | 🟨 in progress — evaluator done through C-v6, AST cache C-v7a, and the v8a wiring landed behind `JUTSU_RUST_EVAL` (default off); remainder per `PLAN_C_DONE.md`: close C-v8a (five known divergences + serve-side tests/instrumentation), cross-template serving v8b, measurement + default flip v8c |
+| **D** | Extensions (`loopcontrols`, `do`, `i18n`, `debug`) gating and third-party compat; loaders/bytecache audit; `NativeEnvironment` exclusion | 🟨 in progress — D1 gating/fallback and D2 third-party extension compat landed; D3/D4 open (dispatchable now, see `PLAN_D_PARALLEL.md`) |
+| **E** | JS scaffold + value bridge; split pyo3 glue behind a cargo feature; ship `jutsu-wasm` / `@jutsu/core` for JavaScript | 🟨 started — slice E0 landed as far as the scaffold goes (`js/`, node suite green at 157 incl. golden replay); remaining: pass-kind/lookup-matrix rule suites, then E1 core decoupling, E2 wasm backend, E3 packaging |
 | **F** | Release engineering: wheel matrix (manylinux/macOS/Windows), sdist, clippy, versioning story | ⬜ open |
 
 Two structural decisions are already locked in:
@@ -139,9 +141,12 @@ Two structural decisions are already locked in:
   work has no Rust value; revisit only if profiling says otherwise.
 
 Phase E carries an explicit parity caveat: Python filters and extensions are
-**not** available in JavaScript, so the JS build will support a documented
-subset (upper/lower/join/length/default/escape…) rather than pretending to be
-equivalent.
+**not** available in JavaScript, so the JS build supports a documented subset
+(upper/lower/join/length/default/escape… plus companions) rather than pretending
+to be equivalent; anything unported is *absent* from the registry, never
+approximated. The scaffold declines `compile()`/`render()` with
+`EngineUnavailable` until a wasm backend attaches — no secret second
+interpreter.
 
 ## Repository layout
 
@@ -156,10 +161,18 @@ crates/jutsu-core/
   src/pyrepr.py … .rs         Python repr() formatting for error messages
   src/unicode_tables.rs       generated tables matching CPython `re`
 src/jutsu/                    the Python package (forked from jinja2, imports renamed)
+js/                           @jutsu/core JS scaffold (Phase E slice E0): src/*.mjs
+                                value bridge, filters subset, tests registry,
+                                Environment shell; test/ node:test suites + golden.json
 tests/                        forked Jinja2 test suite + differential Rust tests
-scripts/                      fuzz drivers, unicode-table generator, benchmarks
+scripts/                      fuzz drivers, unicode-table generator, benchmarks,
+                                js_golden.py (golden capture)
 STATUS.md / TODO.md           per-phase status and the ordered to-do list
 PLAN_PARSER.md / PLAN_INTERP.md  design docs for the parser and interpreter ports
+PLAN_C_DONE.md                retargeted Phase-C criteria and remaining slices
+PLAN_D_PARALLEL.md            Phase-D packages, file ownership, conflict matrix
+PLAN_JS.md                    Phase-E plan (slices E0–E3) and recorded decisions
+docs/EXT_COMPAT.md            D2 third-party extension compatibility memo
 ```
 
 ## Building and testing
@@ -183,6 +196,8 @@ install step is required during development:
 ```bash
 pytest                        # forked Jinja2 suite + differential tests
 cargo test                    # Rust unit tests
+node --test js/test/          # JS scaffold suites (no npm dependencies)
+python scripts/js_golden.py   # regenerate the CPython golden capture
 ```
 
 ### Feature flags
