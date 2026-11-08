@@ -1,0 +1,14 @@
+[package]
+name = "jutsu-wasm"
+version = "0.0.1-e0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+jutsu-core = { path = "../crates/jutsu-core" }
+
+[features]
+default = ["jutsu-core/pyo3"]
+pyo3 = ["jutsu-core/pyo3"]

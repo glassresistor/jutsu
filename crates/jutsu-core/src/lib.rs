@@ -1,3 +1,22 @@
+#![cfg_attr(feature = "pyo3", feature(pyo3))]
+
+//! Rust core for jutsu (a port of jinja2).  Currently exposes the lexer; this
+//! will grow into the full template engine core.
+
+pub mod eval;
+pub mod lexer;
+pub mod parser;
+pub mod pyrepr;
+pub mod unicode_tables;
+
+#[cfg(feature = "pyo3")]
+mod pyo3_impl {
+    use pyo3::prelude::*;
+    use pyo3::types::PyList;
+    use pyo3::IntoPyObjectExt;
+
+    use lexer::{Config, LexError, Tok};
+
 //! Rust core for jutsu (a port of jinja2).  Currently exposes the lexer; this
 //! will grow into the full template engine core.
 
