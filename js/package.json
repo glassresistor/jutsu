@@ -1,14 +1,18 @@
 {
   "name": "@jutsu/core",
-  "version": "0.0.1-e0",
-  "description": "JavaScript wrapper for the jutsu template engine (Phase E slice E0: value bridge, filters subset, tests, Environment scaffold).",
+  "version": "0.1.0",
+  "description": "JavaScript wrapper for the jutsu template engine with WASM backend.",
   "type": "module",
   "main": "src/index.mjs",
   "exports": {
+    "./wasm": "./src/wasm.mjs",
     ".": "./src/index.mjs"
   },
   "license": "BSD-3-Clause",
   "scripts": {
     "test": "node --test test/"
+  },
+  "peerDependencies": {
+    "@jutsu/wasm": "0.1.0"
   }
 }
