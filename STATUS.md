@@ -610,3 +610,26 @@ and brings README.md / STATUS.md in line with the codebase, including `js/`
   (`tests/conftest.py` imports it) and PYTHONPATH must keep the
   `.unsloth-packages` entries while adding `src` -- overwriting PYTHONPATH
   wholesale breaks conftest collection.
+
+## Extension environment behavior (2026-11-07)
+
+Environments with extensions render exactly as upstream jinja does, with
+the documented rule enforced end-to-end: any extension contributing
+tags, `filter_stream` or `preprocess` forces the python parse+codegen path
+(and therefore never rust serving); pure runtime extensions (filters/tests only) may still be served by rust.
+
+This behavior is implemented in tests/test_ext_rust.py with differential tests for each
+shipped extension:
+- `loopcontrols` (`break`/`continue`),
+- `do`,
+- `i18n` (`trans`/`gettext`/`ngettext`, translations installed, plural forms),
+- `debug` (`{% debug %}`);
+
+Plus a custom no-tags extension proving the *other* side of the rule (rust eligible).
+
+Instrumented tests assert parser selection (rust vs python) and evaluator eligibility
+per environment shape.
+
+i18n extraction paths (`extract_from_ast`, `babel_extract`) still work through the python parse path.
+
+This behavior is now settled and documented.

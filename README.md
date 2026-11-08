@@ -48,6 +48,12 @@ tpl = env.get_template("index.html")
 print(tpl.render(name="world", items=[1, 2, 3]))
 ```
 
+### Extension Compatibility
+
+Third-party extensions should subclass `jutsu.ext.Extension` to be compatible with jutsu. Extensions that import and use the real upstream `jinja2` package will get the upstream machinery (two independent engines side by side) which is a hazard that should be avoided.
+
+For compatibility with existing codebases, jutsu maintains drop-in compatibility with Jinja2's API. However, extensions are encouraged to explicitly use `jutsu.ext.Extension` for clear separation between implementations and proper Rust core integration.
+
 The public surface is the Jinja2 one — `Environment`, `Template`, all the
 loaders, `Undefined` / `StrictUndefined` / `ChainableUndefined` /
 `DebugUndefined`, `select_autoescape`, the `pass_context` /
@@ -228,3 +234,19 @@ Same terms as upstream Jinja (BSD-3-Clause, Pallets) — see `LICENSE.txt`.
 
 Jinja is some weird rename of ninja also a weird rename of shinobi.  `jutsu` is unique enough
 not to be confused, has same first letter and probably will make a cool icon.
+
+### Extension Environment Behavior
+
+Extensions in jutsu render exactly as upstream Jinja does, with
+the documented rule enforced end-to-end: any extension contributing
+ tags, `filter_stream` or `preprocess` forces the python parse+codegen path
+(and therefore never rust serving); pure runtime extensions (filters/tests only) may still be served by rust.
+
+This behavior is implemented in tests/test_ext_rust.py with differential tests for each
+shipped extension:
+- `loopcontrols` (`break`/`continue`),
+- `do`,
+- `i18n` (`trans`/`gettext`/`ngettext`, translations installed, plural forms),
+- `debug` (`{% debug %}`);
+
+Plus a custom no-tags extension proving the *other* side of the rule (rust eligible).
