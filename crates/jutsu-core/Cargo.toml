@@ -8,4 +8,8 @@ name = "_jutsu"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.23", features = ["extension-module", "py-clone"] }
+pyo3 = { version = "0.23", features = ["extension-module", "py-clone"], optional = true }
+
+[features]
+default = ["pyo3"]
+pyo3 = ["dep:pyo3"]
