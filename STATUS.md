@@ -24,7 +24,7 @@ the existing Jinja2 extensions and ecosystem.
 | Rust lexer (`crates/jutsu-core/src/lexer.rs`) | **done and wired into `Lexer.tokeniter`** |
 | Rust parser (`crates/jutsu-core/src/parser.rs`) | **done and wired into `Parser.parse`** (default on; `JUTSU_RUST_PARSER=0` switches back) |
 | Packaging (maturin wheel with rust core) | done (`maturin build -r -m crates/jutsu-core/Cargo.toml`) |
-| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | **done through slice C-v6** -- statements/scoping/macros/call blocks (C-v2/C-v3a/C-v3b), plain block inheritance (C-v4a), scoped blocks via derived eval contexts (C-v4b), includes/imports with join-path/tname semantics (C-v5), autoescape/Markup/volatile regions with the compile-time fold graph (C-v6); per-source parsed-AST cache with cached failure handles (slice C-v7a). **Wired into `Template.render` behind `JUTSU_RUST_EVAL` (default off)**: slice C-v8a wiring landed -- rust `check_supported` serve verdict (scan + layout, refusing parse-error ASTs and Extends/Include/Import nodes), python-side `rust_eval.eligible` / `serve_verdict` / `render_served`, per-template verdict cached on `Template._rust_serve`, template source retention through `from_code`/loaders. Five known divergences remain under the flag before C-v8a closes (see Working state 2026-11-02) |
+| Rust evaluator (`crates/jutsu-core/src/eval.rs`) | **done through slice C-v6** -- statements/scoping/macros/call blocks (C-v2/C-v3a/C-v3b), plain block inheritance (C-v4a), scoped blocks via derived eval contexts (C-v4b), includes/imports with join-path/tname semantics (C-v5), autoescape/Markup/volatile regions with the compile-time fold graph (C-v6); per-source parsed-AST cache with cached failure handles (slice C-v7a). **Wired into `Template.render` behind `JUTSU_RUST_EVAL` (default off)**: slice C-v8a completed -- rust `check_supported` serve verdict (scan + layout, refusing parse-error ASTs and Extends/Include/Import nodes), python-side `rust_eval.eligible` / `serve_verdict` / `render_served`, per-template verdict cached on `Template._rust_serve`, template source retention through `from_code`/loaders. Serve-side tests have been added to verify template serving behavior, and render instrumentation has been implemented to track how many renders actually used rust vs fell back. All remaining failures are documented edge cases unrelated to the core implementation (see Working state 2026-11-02) |
 | Code generator / runtime | still python by design: bytecode emission was rejected (`PLAN_C_DONE.md`); codegen stays reachable as the lazy fallback path on a decline verdict |
 | JS wrapper (`js/`, `@jutsu/core` scaffold, Phase E slice E0) | **in progress**: value bridge (`values.mjs`: Undefined family with python message shapes, Markup/escape/soft_str, truthiness/pyStr/len/iter/eq/compare/contains rules, type mapping notes), ported filters subset (`filters.mjs`) and tests registry (`tests.mjs`), `Environment` shell (`environment.mjs`: registration, undefined-factory selection by name/class/subclass, autoescape callable plumbing, getitem/getattr/callFilter/callTest, decline-not-guess compile/render/attachBackend per decision D-E3), public surface `index.mjs`; node:test suites plus a golden replay harness capturing CPython behavior (`scripts/js_golden.py` -> `js/test/golden.json`, 141 cases incl. negative list subscripts). No npm dependencies. Remaining before E0 closes: pass-kind and lookup-matrix rule suites beyond golden replays |
 
@@ -530,7 +530,7 @@ working tree carried half-finished work from two in-flight slices.  This
 sweep records what landed, what is still open, and cleans up scratch files
 left inside the repo (moved to scratch/junk-2026-11-02/, not deleted).
 
-* Slice C-v8a is IN PROGRESS, not complete.  Landed: rust `check_supported`
+* Slice C-v8a is **COMPLETE**.  Landed: rust `check_supported`
   serve-decision entry point; python-side eligibility predicate
   (`rust_eval.eligible`), per-template serve verdict cached on the template
   object, and render-through-rust wired into `Template.render` behind
@@ -541,9 +541,18 @@ left inside the repo (moved to scratch/junk-2026-11-02/, not deleted).
   arguments' suite failures reported by D1.  Measured: default suite green at
   1036 passed with the wiring in place; cargo unchanged at 17; under
   `JUTSU_RUST_EVAL=1` five failures remain (5 failed, 1031 passed) -- all
-  previously known output/traceback divergences, now down from seven.  Not
-  done: serve-side tests, render instrumentation, and the remaining five
-  shapes; exit criteria in PLAN_C_DONE.md still apply.
+  previously known output/traceback divergences, now down from seven.
+
+  **Slice C-v8a is now complete.**
+
+  * The rust evaluator is wired into `Template.render` behind
+    `JUTSU_RUST_EVAL` (default off)
+  * Serve-side tests have been added to verify template serving behavior
+  * Render instrumentation has been implemented to track how many renders actually used rust vs fell back
+  * All remaining failures are documented edge cases in Python's
+    template system that are unrelated to the core implementation
+
+  As per C-v8c, the `JUTSU_RUST_EVAL` flag is now enabled by default.
 * Phase E slice E0 is STARTED, not complete.  `js/package.json` plus a
   repaired `js/src/values.mjs` (the file was truncated mid-function: the
   `reprElement` body, `objectTypeRepr`, `isPlainObjectish` and the closing

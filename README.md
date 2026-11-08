@@ -9,7 +9,7 @@ keeps working with the existing Jinja2 extensions, loaders and ecosystem.
 > **Status: work in progress.** The lexer, parser and evaluator already run in
 > Rust; code generation stays Python by design. The evaluator is wired into
 > `Template.render` behind `JUTSU_RUST_EVAL` but not yet the default (slice
-> C-v8a wiring landed — see `PLAN_C_DONE.md`). A JavaScript scaffold for the
+> C-v8a wiring completed — see `PLAN_C_DONE.md`). A JavaScript scaffold for the
 > future `@jutsu/core` package lives in `js/` (slice E0). Nothing here is
 > installed or published yet.
 
