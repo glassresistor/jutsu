@@ -2678,6 +2678,24 @@ other => Err(nope(other.to_string())),
                                 let kind = if is_filter { "filter" } else { "test" };
                                 return Err(nope(format!("missing {} {:?}", kind, nm)));
                             }
+                            // Compile-time folding of a filter/test whose every
+                            // part is constant means python's code generator
+                            // CALLS the function once while generating and then
+                            // never at render; a rust-served evaluation of the
+                            // same tree would run that user code once per
+                            // render instead -- side-effect counts diverge even
+                            // though rendered text matches.  Decline rather
+                            // than guess (PLAN_C_DONE.md R1): the python path
+                            // stays byte-identical, including the call counts
+                            // the forked suite asserts on.
+                            if self.folds_at_compile(is_filter, args)? {
+                                let kind = if is_filter { "filter" } else { "test" };
+                                return Err(nope(format!(
+                                    "compile-time folded {} {:?}",
+                                    kind,
+                    nm
+                                )));
+                            }
                         }
                     }
                 }
@@ -2798,6 +2816,233 @@ other => Err(nope(other.to_string())),
             _ => {}
         }
         Ok(())
+    }
+
+    /// Would python's optimizer fold this `_FilterTestCommon` node at compile
+    /// time -- i.e. does code generation *call* the filter or test function
+    /// once while generating, so that a rust-served evaluation of the same
+    /// expression would run that user code an extra time per render?  Decided
+    /// without executing: the subject and every argument must be pure per
+    /// :meth:`pure_fold`.  Filter-block targets (subject ``None``) and
+    /// context-marked callables never fold, exactly like
+    /// `_FilterTestCommon.as_const`; eval-context/environment markers DO fold,
+    /// by calling with the extra argument inserted.  A volatile region would
+    /// also skip folding at codegen time -- treating those as folded anyway
+    /// only declines a template that could have been served, never serves a
+    /// divergent one, so the simplification is safe (recorded in
+    /// ACCEPTED_DIVERGENCES.md).
+    fn folds_at_compile(&self, is_filter: bool, na: &[Av]) -> Result<bool, EvalErr> {
+        if na.len() < 6 || matches!(&na[0], Av::NoneV) {
+            return Ok(false);
+        }
+        let fname = match arg_str(&na[1]) {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+        let map = if is_filter { self.filters() } else { self.tests() };
+        let func = match map.get_item(fname)? {
+            Some(f) => f,
+            None => return Ok(false),
+        };
+        // Only the context-marked callables are excluded from folding; the
+        // marker attribute is the same one `fold_filter_test` consults.
+        if let Ok(p) = func.getattr("jinja_pass_arg") {
+            if let Ok(nm) = p.getattr("name")?.extract::<String>() {
+                if nm == "context" {
+                    return Ok(false);
+                }
+            }
+        }
+        // Dynamic argument slots are rejected by the scan separately; here
+        // they just mean "not provably pure".
+        if !matches!(&na[4], Av::NoneV) || !matches!(&na[5], Av::NoneV) {
+            return Ok(false);
+        }
+        if self.pure_fold(&na[0])?.is_none() {
+            return Ok(false);
+        }
+        match &na[2] {
+            Av::List(l) => {
+                for a in l {
+                    if self.pure_fold(a)?.is_none() {
+                        return Ok(false);
+                    }
+                }
+            }
+            _ => return Ok(false),
+        }
+        match &na[3] {
+            Av::List(l) => {
+                for p in l {
+                    let (pn, pa) = match parts(p) {
+                        Some(x) => x,
+                        None => return Ok(false),
+                    };
+                    if pn != "Pair" || pa.len() < 2 {
+                        return Ok(false);
+                    }
+                    if self.pure_fold(&pa[1])?.is_none() {
+                        return Ok(false);
+                    }
+                }
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Restricted `as_const` mirror that never touches user callables -- used
+    /// by the scan to classify foldability without executing.  Only literals,
+    /// static containers, arithmetic / comparison / concatenation over pure
+    /// parts and short-circuit boolean / conditional logic may fold; a name
+    /// load, attribute lookup, subscript, call, filter or test makes the whole
+    /// subtree impure, and an operator raising while folding counts as
+    /// non-foldable exactly like `Impossible` does for python's optimizer.
+    fn pure_fold(&self, av: &Av) -> ERes<Option<Bound<'py, PyAny>>> {
+        let (name, args): (&str, &[Av]) = match av {
+            Av::Node(n, _, a) => (*n, a),
+            _ => return Ok(None),
+        };
+        match name {
+            "Const" | "TemplateData" => match args.first() {
+                Some(x) => Ok(Some(self.lit(x)?)),
+                None => Ok(None),
+            },
+            "Tuple" | "List" => {
+                let items = match args.first() {
+                    Some(Av::List(l)) => l,
+                    _ => return Ok(None),
+                };
+                let mut vals: Vec<Bound<'py, PyAny>> = Vec::new();
+                for it in items {
+                    match self.pure_fold(it)? {
+                        Some(v) => vals.push(v),
+                        None => return Ok(None),
+                    }
+                }
+                if name == "Tuple" {
+                    Ok(Some(PyTuple::new(self.py, &vals)?.into_any()))
+                } else {
+                    Ok(Some(PyList::new(self.py, &vals)?.into_any()))
+                }
+            }
+            "Dict" => {
+                let items = match args.first() {
+                    Some(Av::List(l)) => l,
+                    _ => return Ok(None),
+                };
+                let d = PyDict::new(self.py);
+                for it in items {
+                    let (pn, pa) = match parts(it) {
+                        Some(x) => x,
+                        None => return Ok(None),
+                    };
+                    if pn != "Pair" || pa.len() < 2 {
+                        return Ok(None);
+                    }
+                    let k = match self.pure_fold(&pa[0])? { Some(v) => v, None => return Ok(None) };
+                    let v = match self.pure_fold(&pa[1])? { Some(v) => v, None => return Ok(None) };
+                    d.set_item(&k, &v)?;
+                }
+                Ok(Some(d.into_any()))
+            }
+            "And" | "Or" if args.len() >= 2 => {
+                // python's as_const short-circuits exactly like the runtime
+                // operators: `left and right` / `left or right` in value terms.
+                let l = match self.pure_fold(&args[0])? { Some(v) => v, None => return Ok(None) };
+                let truthy = l.is_truthy()?;
+                if truthy == (name == "Or") {
+                    Ok(Some(l))
+                } else {
+                    match self.pure_fold(&args[1])? {
+                        Some(v) => Ok(Some(v)),
+                        None => Ok(None),
+                    }
+                }
+            }
+            "Not" | "Neg" | "Pos" if args.len() >= 1 => {
+                let v = match self.pure_fold(&args[0])? { Some(v) => v, None => return Ok(None) };
+                match name {
+                    "Not" => Ok(Some((!v.is_truthy()?).into_bound_py_any(self.py)?)),
+                    "Neg" => self.try_fold(v.neg()),
+                    _ => self.try_fold(v.pos()),
+                }
+            }
+            "Add" | "Sub" | "Mul" | "Div" | "FloorDiv" | "Pow" | "Mod" if args.len() >= 2 => {
+                let a = match self.pure_fold(&args[0])? { Some(v) => v, None => return Ok(None) };
+                let b = match self.pure_fold(&args[1])? { Some(v) => v, None => return Ok(None) };
+                let r: std::result::Result<Bound<'py, PyAny>, PyErr> = match name {
+                    "Add" => a.add(&b),
+                    "Sub" => a.sub(&b),
+                    "Mul" => a.mul(&b),
+                    "Div" => a.div(&b),
+                    "FloorDiv" => a.floor_div(&b),
+                    "Mod" => a.rem(&b),
+                    _ => a.pow(&b, self.py.None()),
+                };
+                self.try_fold(r)
+            }
+            "Compare" if args.len() >= 2 => {
+                let mut cur = match self.pure_fold(&args[0])? { Some(v) => v, None => return Ok(None) };
+                let ops = match &args[1] {
+                    Av::List(l) => l,
+                    _ => return Ok(None),
+                };
+                for op in ops.iter() {
+                    let (on, oa) = match parts(op) {
+                        Some(x) => x,
+                        None => return Ok(None),
+                    };
+                    if on != "Operand" || oa.len() < 2 {
+                        return Ok(None);
+                    }
+                    let rhs = match self.pure_fold(&oa[1])? { Some(v) => v, None => return Ok(None) };
+                    let ok = match arg_str(&oa[0]) {
+                        Some(opc) if opc == "eq" => cur.eq(&rhs)?,
+                        Some(opc) if opc == "ne" => cur.ne(&rhs)?,
+                        Some(opc) if opc == "lt" => cur.lt(&rhs)?,
+                        Some(opc) if opc == "lteq" => cur.le(&rhs)?,
+                        Some(opc) if opc == "gt" => cur.gt(&rhs)?,
+                        Some(opc) if opc == "gteq" => cur.ge(&rhs)?,
+                        Some(opc) if opc == "in" => rhs.contains(&cur)?,
+                        Some(opc) if opc == "notin" => !rhs.contains(&cur)?,
+                        _ => return Ok(None),
+                    };
+                    if !ok {
+                        return Ok(Some(false.into_bound_py_any(self.py)?));
+                    }
+                    cur = rhs;
+                }
+                Ok(Some(true.into_bound_py_any(self.py)?))
+            }
+            "Concat" => {
+                let ps = match args.first() {
+                    Some(Av::List(l)) => l,
+                    _ => return Ok(None),
+                };
+                // python's `Concat.as_const` joins with plain str() semantics.
+                let mut buf = String::new();
+                for pt in ps {
+                    match self.pure_fold(pt)? {
+                        Some(v) => buf.push_str(&v.str()?.extract::<String>()?),
+                        None => return Ok(None),
+                    }
+                }
+                Ok(Some(PyString::new(self.py, &buf).into_any()))
+            }
+            "CondExpr" if args.len() >= 3 => {
+                let t = match self.pure_fold(&args[0])? { Some(v) => v, None => return Ok(None) };
+                if t.is_truthy()? {
+                    match self.pure_fold(&args[1])? { Some(v) => Ok(Some(v)), None => Ok(None) }
+                } else if matches!(&args[2], Av::NoneV) {
+                    // implicit undefined never folds (as_const raises Impossible)
+                    Ok(None)
+                } else {
+                    match self.pure_fold(&args[2])? { Some(v) => Ok(Some(v)), None => Ok(None) }
+                }
+            }
+            _ => Ok(None),
+        }
     }
 
     fn find_loop_store(&self, av: &Av) -> Option<u32> {

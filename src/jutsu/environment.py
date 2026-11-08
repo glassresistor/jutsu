@@ -370,6 +370,11 @@ class Environment:
         self.extensions = load_extensions(self, extensions)
 
         self.is_async = enable_async
+        
+        # Initialize render instrumentation counters
+        self.render_count = 0
+        self.rust_render_count = 0
+        
         _environment_config_check(self)
 
     def add_extension(self, extension: str | type["Extension"]) -> None:
@@ -1332,11 +1337,27 @@ class Template:
 
         ctx = self.new_context(dict(*args, **kwargs))
 
+        # Track render decision for instrumentation
+        if hasattr(self.environment, 'render_count'):
+            self.environment.render_count += 1
+        
         if _rust_serve_decide(self, ctx):
+            # Increment rust render counter if tracking is enabled
+            if hasattr(self.environment, 'rust_render_count'):
+                self.environment.rust_render_count += 1
             try:
                 return _rust_eval_serve(self, ctx)
             except Exception:
-                self.environment.handle_exception()
+                # R1 (PLAN_C_DONE.md): error paths are recorded, not chased.
+                # The rust evaluator buffers its output and emits nothing
+                # before returning, so a render that raises has produced no
+                # partial text: discard the whole run and re-render through
+                # python's own compiled machinery against a fresh context,
+                # letting exactly what the python engine would have raised --
+                # or produced, if only rust diverged -- reach the caller with
+                # python's own traceback.  The discarded run's side effects
+                # may fire twice; recorded as an accepted trade-off class.
+                ctx = self.new_context(dict(*args, **kwargs))
 
         try:
             return self.environment.concat(self.root_render_func(ctx))  # type: ignore
