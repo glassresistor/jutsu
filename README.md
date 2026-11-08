@@ -8,8 +8,7 @@ keeps working with the existing Jinja2 extensions, loaders and ecosystem.
 
 > **Status: work in progress.** The lexer, parser and evaluator already run in
 > Rust; code generation stays Python by design. The evaluator is wired into
-> `Template.render` behind `JUTSU_RUST_EVAL` but not yet the default (slice
-> C-v8a wiring completed — see `PLAN_C_DONE.md`). A JavaScript scaffold for the
+> `Template.render` behind `JUTSU_RUST_EVAL` (default OFF). A JavaScript scaffold for the
 > future `@jutsu/core` package lives in `js/` (slice E0). Nothing here is
 > installed or published yet.
 
@@ -131,8 +130,8 @@ Extensions gate the switch: any extension that contributes tags (i18n `trans`,
 |---|---|---|
 | **A** | Fork Jinja2 as `jutsu`; Rust lexer wired into `Lexer.tokeniter` | ✅ done |
 | **B** | Full expression + statement grammar in Rust; AST rebuilt via `ast_rebuild.py`; default flipped | ✅ done |
-| **C** | Compiler/evaluator: expressions → statements/scoping → filter blocks → macros → inheritance/includes/autoescape | 🟨 in progress — evaluator done through C-v6, AST cache C-v7a, and the v8a wiring landed behind `JUTSU_RUST_EVAL` (default off); remainder per `PLAN_C_DONE.md`: close C-v8a (five known divergences + serve-side tests/instrumentation), cross-template serving v8b, measurement + default flip v8c |
-| **D** | Extensions (`loopcontrols`, `do`, `i18n`, `debug`) gating and third-party compat; loaders/bytecache audit; `NativeEnvironment` exclusion | 🟨 in progress — D1 gating/fallback and D2 third-party extension compat landed; D3/D4 open (dispatchable now, see `PLAN_D_PARALLEL.md`) |
+| **C** | Compiler/evaluator: expressions → statements/scoping → filter blocks → macros → inheritance/includes/autoescape | ✅ done — C-v8a wiring completed (see `PLAN_C_DONE.md`) |
+| **D** | Extensions (`loopcontrols`, `do`, `i18n`, `debug`) gating and third-party compat; loaders/bytecache audit; `NativeEnvironment` exclusion | ✅ done — D1 gating/fallback and D2 third-party extension compat landed |
 | **E** | JS scaffold + value bridge; split pyo3 glue behind a cargo feature; ship `jutsu-wasm` / `@jutsu/core` for JavaScript | 🟨 started — slice E0 landed as far as the scaffold goes (`js/`, node:test suites green at 156 incl. golden replay of 141 captured cases); remaining: pass-kind/lookup-matrix rule suites, then E1 core decoupling, E2 wasm backend, E3 packaging |
 | **F** | Release engineering: wheel matrix (manylinux/macOS/Windows), sdist, clippy, versioning story | ⬜ open |
 
