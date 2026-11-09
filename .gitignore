@@ -4,3 +4,4 @@ target/
 .pytest_cache/
 dist/
 scripts/*mismatch*.txt
+scratch/
