@@ -21,7 +21,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build:
     name: Build .so + WASM
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CARGO_TERM_COLOR: always
     steps:
@@ -39,7 +39,6 @@ jobs:
 
       - name: Set up Rust
         run: |
-          rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add wasm32-unknown-unknown
 
@@ -51,7 +50,7 @@ jobs:
 
       # --- Build the Python extension (.so) ---
       - name: Build Rust core (.so)
-        run: cargo build --release -p jutsu-core --locked
+        run: cargo build --release -p jutsu-core
 
       - name: Verify .so loads
         run: |

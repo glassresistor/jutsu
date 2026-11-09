@@ -87,6 +87,7 @@ def test_synthetic_extension_forces_python_parse(extpkg, monkeypatch):
     assert _extensions_contribute(env)
 
 
+@pytest.mark.skipif(not rust_eval.has_rust_core(), reason="requires rust core")
 def test_synthetic_extension_ineligible_for_rust_serving(extpkg, monkeypatch):
     """With the rust evaluator active the third-party extension environment is
     still ineligible: extensions contributing tags never get served by rust."""
@@ -97,6 +98,7 @@ def test_synthetic_extension_ineligible_for_rust_serving(extpkg, monkeypatch):
     assert out == "!!!GO!!!"
 
 
+@pytest.mark.skipif(not rust_eval.has_rust_core(), reason="requires rust core")
 def test_synthetic_extension_coexists_with_rust_cores(extpkg, monkeypatch):
     """An environment carrying the third-party extension plus plain templates:
     the plain ones may be rust-served while the extension one is python-served,

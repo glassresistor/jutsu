@@ -9,6 +9,9 @@ from jutsu import Environment, DictLoader
 from jutsu.environment import _rust_serve_decide, _rust_eval_serve
 from jutsu import rust_eval
 
+if not rust_eval.has_rust_core():
+    pytest.skip("rust core not built", allow_module_level=True)
+
 
 def test_render_instrumentation():
     """Test render instrumentation tracking."""
