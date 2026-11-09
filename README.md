@@ -1,23 +1,16 @@
-> ## ⚠️ Recovery notice (2026-11-08)
->
-> This repository was corrupted by later commits after **`fdd055c`** (the last
-> verified-green state: Rust 17 / Python 1036 / JS 156). The current tip does
-> **not compile in Rust** and carries invented, failing test files. Before doing
-> any work, read **[`RECOVERY_2026-11-08.md`](RECOVERY_2026-11-08.md)** — it has
-> the measured ground truth, the commit-by-commit damage log, and hard rules
-> R1–R8 that prevent the corruption from recurring. Resume from `fdd055c`.
+# Jutsu
 
-# jutsu
-
-**Jinja2, ported to Rust — with a Python wrapper.**
+**Jinja2, ported to Rust — with a Python and JS/WASM wrapper.**
 
 `jutsu` is a fork of [pallets/jinja](https://github.com/pallets/jinja) (Jinja 3.1.x)
-in which the engine internals are being rewritten in Rust, while the Python package stays the public interface. The end state is a native compiled core that
+in which the engine internals are have been rewritten in Rust, while the Python and JS package stays the public interface. The end state is a native compiled core that
 keeps working with the existing Jinja2 extensions, loaders and ecosystem.
+
+Checkout the in browser WASM example https://glassresistor.github.io/jutsu/
 
 > **Status: work in progress.** The lexer, parser and evaluator already run in
 > Rust; code generation stays Python by design. The evaluator is wired into
-> `Template.render` behind `JUTSU_RUST_EVAL` (default OFF). A JavaScript scaffold for the
+> `Template.render` behind `JUTSU_RUST_EVAL` (default ON). A JavaScript scaffold for the
 > future `@jutsu/core` package lives in `js/` (slice E0). Nothing here is
 > installed or published yet.
 
@@ -46,7 +39,7 @@ behaviour matches *by construction* rather than by reimplementation: `Undefined`
 raises the same `UndefinedError`, chained comparisons short-circuit like Python,
 and a failing operation propagates the original exception object untouched.
 
-### Planned API (drop-in for Jinja2)
+### API (drop-in for Jinja2)
 
 ```python
 from jutsu import Environment, Template, FileSystemLoader
