@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>jutsu WASM — Live Template Editor</title>
+<style>
+    :root {
+        --bg: #0d1117;
+        --surface: #161b22;
+        --border: #30363d;
+        --text: #c9d1d9;
+        --text-muted: #8b949e;
+        --accent: #58a6ff;
+        --green: #3fb950;
+        --red: #f85149;
+        --yellow: #d29922;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.6;
+        padding: 2rem;
+        max-width: 1400px;
+        margin: 0 auto;
+    }
+    h1 {
+        font-size: 1.8rem;
+        margin-bottom: 0.3rem;
+        color: var(--accent);
+    }
+    h1 span { color: var(--text-muted); font-weight: normal; font-size: 1rem; }
+    .subtitle {
+        color: var(--text-muted);
+        margin-bottom: 1.5rem;
+        font-size: 0.9rem;
+    }
+    .status {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        margin-left: 8px;
+    }
+    .status.loading { background: var(--yellow); color: #000; }
+    .status.ready { background: var(--green); color: #000; }
+    .status.error { background: var(--red); color: #fff; }
+
+    .layout {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+        margin-bottom: 1rem;
+    }
+    @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+
+    .panel {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    .panel-header {
+        padding: 0.6rem 1rem;
+        border-bottom: 1px solid var(--border);
+        font-size: 0.8rem;
+        font-weight: 600;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    .panel-body {
+        padding: 0;
+    }
+    textarea, input[type="text"] {
+        width: 100%;
+        background: var(--bg);
+        color: var(--text);
+        border: none;
+        padding: 0.8rem 1rem;
+        font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+        font-size: 0.85rem;
+        resize: vertical;
+        outline: none;
+        min-height: 200px;
+    }
+    textarea:focus, input:focus {
+        box-shadow: inset 0 0 0 1px var(--accent);
+    }
+    .output {
+        padding: 0.8rem 1rem;
+        font-family: 'SF Mono', 'Fira Code', monospace;
+        font-size: 0.9rem;
+        white-space: pre-wrap;
+        word-break: break-word;
+        min-height: 200px;
+        max-height: 400px;
+        overflow-y: auto;
+    }
+    .output.error { color: var(--red); }
+    .output.success { color: var(--green); }
+
+    .tokens {
+        padding: 0.8rem 1rem;
+        font-family: 'SF Mono', 'Fira Code', monospace;
+        font-size: 0.75rem;
+        max-height: 300px;
+        overflow-y: auto;
+        color: var(--text-muted);
+    }
+    .token-line { padding: 1px 0; }
+    .token-type { color: var(--accent); }
+    .token-value { color: var(--text); }
+
+    .toolbar {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+        flex-wrap: wrap;
+    }
+    button {
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        padding: 0.5rem 1.2rem;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: opacity 0.15s;
+    }
+    button:hover { opacity: 0.85; }
+    button.secondary {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        color: var(--text);
+    }
+    .examples {
+        display: flex;
+        gap: 0.4rem;
+        flex-wrap: wrap;
+    }
+    .examples button {
+        padding: 0.3rem 0.7rem;
+        font-size: 0.75rem;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+    }
+    .examples button:hover { border-color: var(--accent); color: var(--accent); }
+
+    .full-width { grid-column: 1 / -1; }
+</style>
+</head>
+<body>
+<h1>jutsu <span>WASM Template Engine</span> <span id="status" class="status loading">loading…</span></h1>
+<p class="subtitle">Rust lexer running in WebAssembly → JS interpreter renders the template. Tokenization is 100% Rust.</p>
+
+<div class="toolbar">
+    <button id="btn-render">▶ Render</button>
+    <button id="btn-tokens" class="secondary">Show Tokens</button>
+    <div class="examples">
+        <button data-example="basic">Basic</button>
+        <button data-example="filters">Filters</button>
+        <button data-example="loop">Loop</button>
+        <button data-example="conditional">Conditional</button>
+        <button data-example="complex">Complex</button>
+    </div>
+</div>
+
+<div class="layout">
+    <div class="panel">
+        <div class="panel-header"><span>Template</span><span>Rust lexer → tokens</span></div>
+        <div class="panel-body">
+            <textarea id="template" spellcheck="false">Hello {{ name }}! You have {{ count }} messages.</textarea>
+        </div>
+    </div>
+    <div class="panel">
+        <div class="panel-header"><span>Context (JSON)</span></div>
+        <div class="panel-body">
+            <textarea id="context" spellcheck="false">{ "name": "World", "count": 42 }</textarea>
+        </div>
+    </div>
+</div>
+
+<div class="layout">
+    <div class="panel full-width">
+        <div class="panel-header"><span>Output</span><span id="render-time"></span></div>
+        <div class="panel-body">
+            <div id="output" class="output">Click "Render" to see the result.</div>
+        </div>
+    </div>
+</div>
+
+<div class="layout">
+    <div class="panel full-width" id="token-panel" style="display:none">
+        <div class="panel-header"><span>Token Stream (from Rust WASM)</span><span id="token-count"></span></div>
+        <div class="panel-body">
+            <div id="tokens" class="tokens"></div>
+        </div>
+    </div>
+</div>
+
+<script type="module">
+import { render, tokenize } from './js/renderer.mjs';
+
+const $template = document.getElementById('template');
+const $context = document.getElementById('context');
+const $output = document.getElementById('output');
+const $tokens = document.getElementById('tokens');
+const $tokenPanel = document.getElementById('token-panel');
+const $tokenCount = document.getElementById('token-count');
+const $renderTime = document.getElementById('render-time');
+const $status = document.getElementById('status');
+
+// WASM auto-instantiates on import (bundler target)
+$status.textContent = 'ready';
+$status.className = 'status ready';
+
+// Examples
+const examples = {
+    basic: {
+        template: 'Hello {{ name }}!\nYou have {{ count }} unread messages.',
+        context: '{ "name": "World", "count": 42 }'
+    },
+    filters: {
+        template: '{{ title | upper }}\n{{ title | lower }}\n{{ title | capitalize }}\n{{ items | join(", ") }}\n{{ greeting | replace("there", "Jutsu") }}',
+        context: '{ "title": "hello world", "items": ["a", "b", "c"], "greeting": "Hello there" }'
+    },
+    loop: {
+        template: '{% for item in items %}\n  {{ loop.index }}. {{ item.name }} ({{ item.price }})\n{% endfor %}',
+        context: '{ "items": [{"name": "Widget", "price": 9.99}, {"name": "Gadget", "price": 24.5}, {"name": "Doohickey", "price": 3.75}] }'
+    },
+    conditional: {
+        template: '{% if score >= 90 %}\nGrade: A (excellent!)\n{% elif score >= 80 %}\nGrade: B (good)\n{% elif score >= 70 %}\nGrade: C (okay)\n{% else %}\nGrade: F (study more)\n{% endif %}',
+        context: '{ "score": 85 }'
+    },
+    complex: {
+        template: '<h1>{{ page_title | upper }}</h1>\n<p>Welcome, {{ user.name }}!</p>\n<ul>\n{% for msg in messages %}\n  <li class="{{ msg.type }}">{{ msg.text }}</li>\n{% endfor %}\n</ul>\n{% if user.admin %}\n<p><em>Admin: {{ user.role }}</em></p>\n{% endif %}\n<p>Total: {{ messages | length }} messages</p>',
+        context: '{ "page_title": "Dashboard", "user": {"name": "Alice", "admin": true, "role": "superuser"}, "messages": [{"type": "info", "text": "Server updated"}, {"type": "warn", "text": "Disk 80% full"}, {"type": "error", "text": "Job failed"}] }'
+    }
+};
+
+// Load example
+document.querySelectorAll('[data-example]').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const ex = examples[btn.dataset.example];
+        if (ex) {
+            $template.value = ex.template;
+            $context.value = ex.context;
+            doRender();
+        }
+    });
+});
+
+// Render button
+document.getElementById('btn-render').addEventListener('click', doRender);
+document.getElementById('btn-tokens').addEventListener('click', showTokens);
+
+// Ctrl+Enter to render
+$template.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') doRender();
+});
+
+function doRender() {
+    const source = $template.value;
+    let ctx = {};
+    try {
+        ctx = JSON.parse($context.value);
+    } catch (e) {
+        $output.textContent = `Context JSON error: ${e.message}`;
+        $output.className = 'output error';
+        return;
+    }
+
+    const t0 = performance.now();
+    try {
+        const result = render(source, ctx);
+        const ms = (performance.now() - t0).toFixed(1);
+        $output.textContent = result || '(empty)';
+        $output.className = 'output success';
+        $renderTime.textContent = `${ms}ms`;
+    } catch (e) {
+        $output.textContent = e.message;
+        $output.className = 'output error';
+        $renderTime.textContent = '';
+    }
+}
+
+function showTokens() {
+    const source = $template.value;
+    try {
+        const toks = tokenize(source);
+        $tokenPanel.style.display = '';
+        $tokenCount.textContent = `${toks.length} tokens`;
+        $tokens.innerHTML = toks.map(t =>
+            `<div class="token-line"><span class="token-type">[${t.line}] ${t.type}</span> <span class="token-value">${escapeHtml(t.value)}</span></div>`
+        ).join('');
+    } catch (e) {
+        $tokens.innerHTML = `<span style="color:var(--red)">${escapeHtml(e.message)}</span>`;
+    }
+}
+
+function escapeHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// Auto-render on load
+doRender();
+</script>
+</body>
+</html>

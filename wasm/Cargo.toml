@@ -1,14 +1,17 @@
+[workspace]
+
 [package]
 name = "jutsu-wasm"
-version = "0.0.1-e0"
+version = "0.1.0"
 edition = "2021"
+description = "WASM bindings for the jutsu template lexer"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-jutsu-core = { path = "../crates/jutsu-core" }
+wasm-bindgen = "0.2"
 
-[features]
-default = ["jutsu-core/pyo3"]
-pyo3 = ["jutsu-core/pyo3"]
+[profile.release]
+opt-level = "s"
+lto = true

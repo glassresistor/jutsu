@@ -1,0 +1,18 @@
+{
+  "name": "jutsu-wasm",
+  "type": "module",
+  "description": "WASM bindings for the jutsu template lexer",
+  "version": "0.1.0",
+  "files": [
+    "jutsu_wasm_bg.wasm",
+    "jutsu_wasm.js",
+    "jutsu_wasm_bg.js",
+    "jutsu_wasm.d.ts"
+  ],
+  "main": "jutsu_wasm.js",
+  "types": "jutsu_wasm.d.ts",
+  "sideEffects": [
+    "./jutsu_wasm.js",
+    "./snippets/*"
+  ]
+}
