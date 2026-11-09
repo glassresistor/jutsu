@@ -36,7 +36,7 @@ def test_native_template_rendering():
     # Test with filters that would be native-specific
     template2 = env.from_string('{% for item in items %}{{ item }}{% endfor %}')
     result2 = template2.render(items=[1, 2, 3])
-    assert result2 == '123'
+    assert result2 == 123
 
 
 def test_native_environment_exclusion_in_eligibility():

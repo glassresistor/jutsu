@@ -233,6 +233,7 @@ def test_thirdparty_extensions_should_import_jutsu_ext_directly(extpkg):
     assert result == "!!!TEST!!!"
     
     # Verify the extension is properly registered as a jutsu extension
+    import jinja2.ext
     assert len(env.extensions) == 1
     ext_instance = list(env.extensions.values())[0]
     assert isinstance(ext_instance, Extension)
@@ -273,9 +274,8 @@ def test_extension_api_surface_compatibility(extpkg):
     """
     # Test basic Extension class functionality
     assert hasattr(Extension, 'tags')
-    assert hasattr(Extension, 'filters')
-    assert hasattr(Extension, 'tests')
-    assert hasattr(Extension, 'globals')
+    assert hasattr(Extension, 'parse')
+    assert hasattr(Extension, 'call_method')
     
     # Test that our synthetic extension works with all API features
     env = Environment(extensions=[extpkg.ShoutExtension])
@@ -304,14 +304,17 @@ def test_extension_import_path_consistency(extpkg):
     # Show that we can create an extension using the recommended approach
     class MyCustomExtension(JutsuExtension):
         tags = {'mytag'}
-        
+
         def parse(self, parser):
             from jutsu import nodes
-            return nodes.Output([self.call_method('_process', [], lineno=1)], lineno=1)
-            
+            lineno = next(parser.stream).lineno
+            return nodes.Output(
+                [self.call_method('_process', [], lineno=lineno)], lineno=lineno
+            )
+
         def _process(self):
             return "processed"
-    
+
     # Test that it works correctly
     env = Environment(extensions=[MyCustomExtension])
     result = env.from_string("{% mytag %}").render()

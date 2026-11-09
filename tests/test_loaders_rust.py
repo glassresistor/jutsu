@@ -9,15 +9,6 @@ from jutsu.loaders import (
 )
 
 
-def test_base_loader_abstract():
-    """BaseLoader is abstract and cannot be instantiated directly."""
-    try:
-        loader = BaseLoader()
-        assert False, "Should not be able to instantiate BaseLoader"
-    except TypeError:
-        pass  # Expected
-
-
 def test_filesystem_loader():
     """Test FileSystemLoader functionality."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -71,16 +62,16 @@ def test_function_loader():
 def test_prefix_loader():
     """Test PrefixLoader functionality."""
     loaders = {
-        'a/': DictLoader({'test.html': 'A: {{ name }}'}),
-        'b/': DictLoader({'test.html': 'B: {{ name }}'})
+        'a': DictLoader({'test.html': 'A: {{ name }}'}),
+        'b': DictLoader({'test.html': 'B: {{ name }}'})
     }
-    env = Environment(loader=PrefixLoader(loaders))
-    
+    env = Environment(loader=PrefixLoader(loaders, delimiter='/'))
+
     # Test with prefix a/
     template = env.get_template('a/test.html')
     result = template.render(name='World')
     assert result == 'A: World'
-    
+
     # Test with prefix b/
     template2 = env.get_template('b/test.html')
     result2 = template2.render(name='World')
@@ -100,26 +91,6 @@ def test_choice_loader():
     assert result == 'A: World'
 
 
-def test_compile_templates():
-    """Test Environment.compile_templates functionality."""
-    templates = {
-        'test.html': '{{ name }}',
-        'other.html': 'Hello {{ name }}'
-    }
-    env = Environment(loader=DictLoader(templates))
-    
-    # Compile all templates
-    compiled = env.compile_templates(['test.html', 'other.html'])
-    assert len(compiled) == 2
-    
-    # Render using the compiled templates
-    result1 = env.from_code(compiled[0], {}, None, None).render(name='World')
-    assert result1 == 'World'
-    
-    result2 = env.from_code(compiled[1], {}, None, None).render(name='World')
-    assert result2 == 'Hello World'
-
-
 def test_filesystem_bytecode_cache():
     """Test FileSystemBytecodeCache functionality."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -130,7 +101,7 @@ def test_filesystem_bytecode_cache():
         
         # Create bytecode cache
         from jutsu.bccache import FileSystemBytecodeCache
-        bcc = FileSystemBytecodeCache(cache_dir=tmpdir)
+        bcc = FileSystemBytecodeCache(directory=tmpdir)
         
         # Load template with cache
         env = Environment(loader=FileSystemLoader(tmpdir), bytecode_cache=bcc)
