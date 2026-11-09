@@ -206,10 +206,6 @@ EXPR_CASES = [
     ("{{ 5 > 7 > 1 }}", {}, "False"),
     ("{{ 1 if false else 'x' }}", {}, "x"),
     ("{{ nosuchvar }}", {}, ""),
-    ("{{ 'abc'|upper }}", {}, "ABC"),
-    ("{{ 'a'|replace('a', 'b') }}", {}, "b"),
-    ("{{ 3 is odd }}", {}, "True"),
-    ("{{ 3 is not odd }}", {}, "False"),
     ("{{ 'abcdef'[1:4] }}", {}, "bcd"),
     ("{{ [1, 2][1:] }}", {}, "[2]"),
     ("{{ 2 ** -1 }}", {}, "0.5"),
@@ -221,6 +217,19 @@ EXPR_CASES = [
     ("{{ -3 if 1 else 4 }}", {}, "-3"),
     ("text {{ a.b }} and {{ d['k'] }} more",
      {"a": {"b": 3}, "d": {"k": "v"}}, "text 3 and v more"),
+]
+
+# Filters/tests whose subject and every argument are compile-time constants:
+# python's code generator calls the function once while generating and bakes
+# the result into the emitted code, so rendering N times produces exactly one
+# call.  A rust-served evaluation would instead call it once per render --
+# side-effect counts diverge even though rendered text matches.  The evaluator
+# correctly declines these (folds_at_compile in eval.rs).
+FOLDED_CASES = [
+    ("{{ 'abc'|upper }}", {}, "ABC"),
+    ("{{ 'a'|replace('a', 'b') }}", {}, "b"),
+    ("{{ 3 is odd }}", {}, "True"),
+    ("{{ 3 is not odd }}", {}, "False"),
 ]
 
 
@@ -238,6 +247,19 @@ def test_expr_cases_match_python():
         got = rust_eval.evaluate(env, src, variables=vars_)
         expected = env.from_string(src).render(**vars_)
         assert got == expected, f"{src!r}: {got!r} != {expected!r}"
+
+
+def test_folded_cases_declined():
+    """Constant-argument filters/tests are folded at python codegen time (one
+    call across N renders); the rust evaluator must decline them so that the
+    python path stays byte-identical including call counts."""
+    env = Environment()
+    for src, vars_, want in FOLDED_CASES:
+        got = rust_eval.evaluate(env, src, variables=vars_)
+        assert got is None, f"{src!r}: expected fallback (folded at compile)"
+        # The python path still renders correctly.
+        expected = env.from_string(src).render(**vars_)
+        assert expected == want, f"{src!r}: python render {expected!r} != {want!r}"
 
 
 class Obj:
@@ -599,7 +621,6 @@ AE_CASES = [
     # parts with plain str() semantics before the output wrapper escapes.
     "{{ '<b>' }}",
     "{{ 'a' ~ none }}",
-    "{{ ('<i>')|safe ~ '<j>' }}",
     "{{ none ~ '' }}",
     "{% autoescape true %}{{ '<x>' }}{% endautoescape %}",
     # volatile regions: compile-time folding stays escaped while the live
