@@ -1,0 +1,152 @@
+name: Publish
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build the .so and WASM, verify both work, upload as artifacts.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build .so + WASM
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest trio markupsafe jinja2
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # --- Build the Python extension (.so) ---
+      - name: Build Rust core (.so)
+        run: cargo build --release -p jutsu-core --locked
+
+      - name: Verify .so loads
+        run: |
+          cp target/release/lib_jutsu.so src/jutsu/_jutsu.so
+          PYTHONPATH=src python -c "from jutsu.rust_parse import has_rust_core; assert has_rust_core(), 'rust core not loaded'"
+
+      # --- Build the WASM package ---
+      - name: Build WASM
+        working-directory: wasm
+        run: wasm-pack build --target web
+
+      - name: Verify WASM tokenizes
+        working-directory: wasm
+        run: |
+          node --input-type=module -e "
+          import { readFileSync } from 'fs';
+          import init, { tokenize } from './pkg/jutsu_wasm.js';
+          await init(readFileSync('./pkg/jutsu_wasm_bg.wasm'));
+          const toks = JSON.parse(tokenize('Hello {{ name }}!'));
+          if (toks.length < 3) throw new Error('unexpected token count: ' + toks.length);
+          console.log('WASM OK:', toks.length, 'tokens');
+          "
+
+      # --- Upload artifacts (always available from the Actions tab) ---
+      - name: Upload .so artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jutsu-linux-x86_64
+          path: target/release/lib_jutsu.so
+          if-no-files-found: error
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jutsu-wasm
+          path: wasm/pkg/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Deploy the WASM demo to GitHub Pages (on push to main).
+  # ---------------------------------------------------------------------------
+  pages:
+    name: Deploy demo to GitHub Pages
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: wasm
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  # ---------------------------------------------------------------------------
+  # Create a GitHub Release with .so + WASM assets (on tag push).
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download .so artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: jutsu-linux-x86_64
+          path: release-assets/
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: jutsu-wasm
+          path: release-assets/wasm/
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            release-assets/lib_jutsu.so
+            release-assets/wasm/jutsu_wasm_bg.wasm
+            release-assets/wasm/jutsu_wasm.js
+            release-assets/wasm/jutsu_wasm.d.ts
