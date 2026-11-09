@@ -208,7 +208,7 @@
 </div>
 
 <script type="module">
-import { render, tokenize } from './js/renderer.mjs';
+import { init, render, tokenize } from './js/renderer.mjs';
 
 const $template = document.getElementById('template');
 const $context = document.getElementById('context');
@@ -219,9 +219,17 @@ const $tokenCount = document.getElementById('token-count');
 const $renderTime = document.getElementById('render-time');
 const $status = document.getElementById('status');
 
-// WASM auto-instantiates on import (bundler target)
-$status.textContent = 'ready';
-$status.className = 'status ready';
+// Initialize WASM (fetches and instantiates the .wasm binary)
+try {
+    await init();
+    $status.textContent = 'ready';
+    $status.className = 'status ready';
+} catch (e) {
+    $status.textContent = 'error';
+    $status.className = 'status error';
+    $output.textContent = `Failed to load WASM: ${e.message}`;
+    $output.className = 'output error';
+}
 
 // Examples
 const examples = {

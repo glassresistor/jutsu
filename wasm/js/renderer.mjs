@@ -6,19 +6,28 @@
 // reverse, sort, list, escape), for loops, if/elif/else, arithmetic,
 // comparisons, string literals, lists, dicts, and the `~` concat operator.
 
-import { tokenize as wasmTokenize, last_error } from '../pkg/jutsu_wasm.js';
+import wasmInit, { tokenize as wasmTokenize, last_error } from '../pkg/jutsu_wasm.js';
 
-// The bundler-target WASM module auto-instantiates on import.
-// This init is a no-op kept for API compatibility with the HTML page.
+let _initialized = false;
+
+/**
+ * Initialize the WASM module. Must be called before using render/tokenize.
+ * In the browser this fetches and instantiates the .wasm binary.
+ */
 export async function init() {
-    // already initialized by the import above
+    if (!_initialized) {
+        await wasmInit();
+        _initialized = true;
+    }
 }
 
 /**
  * Tokenize a template source using the Rust lexer via WASM.
  * Returns an array of {line, type, value} objects, or throws on error.
+ * Must call `await init()` first.
  */
 export function tokenize(source) {
+    if (!_initialized) throw new Error('Call await init() before tokenize/render');
     const raw = wasmTokenize(source);
     if (raw === undefined) {
         throw new Error(`Lexer error: ${last_error()}`);
@@ -29,8 +38,10 @@ export function tokenize(source) {
 /**
  * Render a template string with the given context.
  * Uses the Rust WASM tokenizer + JS interpreter.
+ * Must call `await init()` first.
  */
 export function render(source, context = {}) {
+    if (!_initialized) throw new Error('Call await init() before tokenize/render');
     const tokens = tokenize(source);
     const interp = new Interpreter(tokens, context);
     return interp.render();
