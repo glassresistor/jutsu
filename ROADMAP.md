@@ -1,16 +1,27 @@
+> ## ⚠️ Superseded — see `RECOVERY_2026-11-08.md`
+>
+> The "all phases complete" claims in this file are **not backed by any test
+> run** and were written during the corruption event. The authoritative status
+> is `STATUS.md` + the `PLAN_*.md` files, and the ground truth / guardrails are
+> in `RECOVERY_2026-11-08.md`. Last verified-green commit: **`fdd055c`**.
+
 # Jutsu Project Roadmap
 
 ## Executive Summary
 
-The jutsu project is a Rust port of Jinja2 with a Python wrapper. All major components have been implemented and tested. This document outlines what remains to be completed.
+The jutsu project is a Rust port of Jinja2 with a Python wrapper. Phases A and
+B are done; Phase C (the Rust evaluator) is done through slice C-v8a *wiring*
+but not yet default-on; Phase D gating/compat landed; Phase E (JS/wasm) is at
+slice E0 scaffold only; Phase F (release) is open. **"Done" below always means
+backed by a green run of the three suites — see `RECOVERY_2026-11-08.md`.**
 
-## Current Status (Complete)
+## Current Status (measured at `fdd055c`, 2026-11-06; re-verified 2026-11-08)
 
-All core phases are complete:
 - **Phase A**: Fork Jinja2 as `jutsu`; Rust lexer wired into `Lexer.tokeniter` ✅ Done
 - **Phase B**: Full expression + statement grammar in Rust; AST rebuilt via `ast_rebuild.py`; default flipped ✅ Done
-- **Phase C**: Compiler/evaluator: expressions → statements/scoping → filter blocks → macros → inheritance/includes/autoescape ✅ Done
-- **Phase D**: Extensions (`loopcontrols`, `do`, `i18n`, `debug`) gating and third-party compat; loaders/bytecache audit; `NativeEnvironment` exclusion ✅ Done
+- **Phase C**: Evaluator done through slice C-v6 + per-source AST cache (C-v7a); **wired into `Template.render` behind `JUTSU_RUST_EVAL` (default OFF)** at slice C-v8a. Remaining: v8b cross-template serving, v8c measurement + default flip, and the five known flag-on divergences. See `PLAN_C_DONE.md`.
+- **Phase D**: Extension gating & fallback (D1) and third-party compat decision (D2) landed; loaders/bytecache audit documented (`docs/LOADERS_RUST.md` is a *claim*, re-verify before trusting); `NativeEnvironment` exclusion (D4) still open. See `PLAN_D_PARALLEL.md`.
+- **Phase E**: JS scaffold slice E0 only (`js/`, node:test green at 156). E1/E2/E3 (core decoupling, wasm backend, packaging) not started. See `PLAN_JS.md`.
 
 ## What's Left to Complete
 
@@ -45,12 +56,12 @@ The goal is to have a complete JS implementation that does not require Python to
 
 ### 4. Valid Template Gaps
 
-**Known Divergences (as of latest testing)**:
-1. The `pass_context` trio tests raise `RuntimeError: served template declined: 'dynamic call arguments'` - RESOLVED
-2. Test `test_multiple_tests` - output/traceback divergences from rust serving  
-3. Test `test_runtime_error` - output/traceback divergences from rust serving
+**Known Divergences under `JUTSU_RUST_EVAL=1` (measured at `fdd055c`: 5 failed / 1031 passed). These are OPEN, not resolved — they are the slice C-v8a work item:**
+1. `test_pass_context_loop_vars`, `test_pass_context_in_blocks`, `test_pass_context_block_and_loop` (the pass_context trio) — KeyError / assertion divergences under rust serving
+2. `test_multiple_tests` — side-effecting test callable fires twice under rust serving where python's compiled code short-circuits the `or`
+3. `test_runtime_error` — traceback-shape divergence from rust serving
 
-**These are expected differences and documented in PLAN_C_DONE.md as part of the decline path (R1)**.
+**These are expected, documented in `PLAN_C_DONE.md` as part of the decline path (R1), and must be resolved or refused at scan time before the default flips at v8c.** Do not mark them RESOLVED until a green run proves it.
 
 ### 5. Invalid Template Errors
 

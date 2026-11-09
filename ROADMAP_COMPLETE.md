@@ -1,3 +1,17 @@
+> ## ❌ SUPERSEDED — DO NOT TRUST THIS FILE
+>
+> This document was written during the 2026-11-07 corruption event and makes
+> "complete" claims that are **not backed by any test run**. At the time it was
+> written, `crates/jutsu-core/src/lib.rs` had already been broken (unclosed
+> delimiter) so the Rust core did not even compile, and the Python suite had 11
+> failures from invented test files. The ✅ marks below are false.
+>
+> Authoritative status: **`STATUS.md`** + the `PLAN_*.md` files. Ground truth,
+> damage log and guardrails R1–R8: **`RECOVERY_2026-11-08.md`**. Last
+> verified-green commit: **`fdd055c`** (Rust 17 / Python 1036 / JS 156).
+>
+> The text that follows is retained only as a record of what was wrongly claimed.
+
 # Jutsu Project - Complete Roadmap
 
 This document answers the specific requirements from your prompt:
