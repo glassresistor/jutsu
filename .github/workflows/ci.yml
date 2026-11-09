@@ -43,7 +43,7 @@ jobs:
       - name: Install Python requirements
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest trio markupsafe
+          python -m pip install pytest trio markupsafe jinja2
 
       - name: Set up Rust
         run: |
@@ -97,7 +97,7 @@ jobs:
       - name: Install Python requirements
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest trio markupsafe
+          python -m pip install pytest trio markupsafe jinja2
 
       # Hide the compiled core committed in git so `from . import _jutsu` fails.
       - name: Remove rust core
