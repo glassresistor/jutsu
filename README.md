@@ -1,3 +1,12 @@
+> ## ⚠️ Recovery notice (2026-11-08)
+>
+> This repository was corrupted by later commits after **`fdd055c`** (the last
+> verified-green state: Rust 17 / Python 1036 / JS 156). The current tip does
+> **not compile in Rust** and carries invented, failing test files. Before doing
+> any work, read **[`RECOVERY_2026-11-08.md`](RECOVERY_2026-11-08.md)** — it has
+> the measured ground truth, the commit-by-commit damage log, and hard rules
+> R1–R8 that prevent the corruption from recurring. Resume from `fdd055c`.
+
 # jutsu
 
 **Jinja2, ported to Rust — with a Python wrapper.**
