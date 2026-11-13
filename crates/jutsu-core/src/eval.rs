@@ -200,6 +200,14 @@ pub struct Session {
     srcs: std::collections::HashMap<String, Option<Vec<PToken>>>,
     /// Parsed and prepared units by template name (slice C-v4).
     units: RefCell<HashMap<String, Rc<UnitInfo>>>,
+    /// Warm-path cache of the per-render compile-time analyses (scan verdict,
+    /// layout check, root frame slot kinds, uses_self) keyed by tree pointer.
+    /// The parsed AST is immutable and shared through `ParsedAst` handles, so
+    /// a fixed tree pointer identifies one template source; the cached values
+    /// depend only on the tree plus the environment's static autoescape flag,
+    /// which is re-checked on every hit.  A miss recomputes everything exactly
+    /// as before and stores the result.
+    unit_prep: RefCell<HashMap<*const Av, UnitPrep>>,
     /// Stable runtime functions cached at session build so every use reuses
     /// the same object instead of a per-node pyo3 attribute lookup
     /// (performance pass part 2).  Module-level objects never change during a
@@ -237,6 +245,22 @@ pub struct RootExec {
     extended: RefCell<bool>,
     /// The prepared parent unit, to be rendered after this body finishes.
     parent: RefCell<Option<Rc<UnitInfo>>>,
+}
+
+/// The once-per-tree results of the pre-execution analyses that used to run
+/// on every render: the scan/layout verdicts, the root frame's slot kinds and
+/// whether an undeclared `self` load needs a param slot.  All fields depend
+/// only on the immutable tree plus the environment's static autoescape flag.
+#[derive(Clone)]
+struct UnitPrep {
+    autoescape: bool,
+    /// Scan passed (otherwise the stored reason is re-reported).
+    scan_ok: bool,
+    scan_reason: Option<String>,
+    layout_ok: bool,
+    layout_reason: Option<String>,
+    root_kinds: Vec<(String, IK)>,
+    uses_self: bool,
 }
 
 /// A parsed and prepared template unit (the interpreter's equivalent of a
@@ -552,6 +576,7 @@ impl Session {
             blocks_reg: RefCell::new(HashMap::new()),
             srcs,
             units: RefCell::new(HashMap::new()),
+            unit_prep: RefCell::new(HashMap::new()),
         }))
     }
 }
@@ -738,6 +763,13 @@ impl<'py> Ev<'py> {
     /// Scope-aware name lookup for load sites: walk the scope chain from the
     /// innermost frame; slots win, otherwise read from the python context.
     fn lookup(&self, name: &str) -> ERes<Bound<'py, PyAny>> {
+        #[cfg(feature = "prof")]
+        return crate::prof::time("lookup", || self.lookup_inner(name));
+        #[cfg(not(feature = "prof"))]
+        self.lookup_inner(name)
+    }
+
+    fn lookup_inner(&self, name: &str) -> ERes<Bound<'py, PyAny>> {
         let found: Option<Option<Py<PyAny>>> = {
             let frames = self.stack.borrow();
             let mut out: Option<Option<Py<PyAny>>> = None;
@@ -824,6 +856,13 @@ impl<'py> Ev<'py> {
     }
 
     fn lit(&self, av: &Av) -> ERes<Bound<'py, PyAny>> {
+        #[cfg(feature = "prof")]
+        return crate::prof::time("lit", || self.lit_inner(av));
+        #[cfg(not(feature = "prof"))]
+        self.lit_inner(av)
+    }
+
+    fn lit_inner(&self, av: &Av) -> ERes<Bound<'py, PyAny>> {
         match av {
             Av::Str(s) => Ok(PyString::new(self.py, s).into_any()),
             Av::Bool(b) => Ok((*b).into_bound_py_any(self.py)?),
@@ -856,6 +895,13 @@ impl<'py> Ev<'py> {
     /// `escape(...)`); inside them the generated code checks the live
     /// attribute per part.
     fn out_wrap(&self, v: &Bound<'py, PyAny>) -> ERes<Bound<'py, PyAny>> {
+        #[cfg(feature = "prof")]
+        return crate::prof::time("out-wrap", || self.out_wrap_inner(v));
+        #[cfg(not(feature = "prof"))]
+        self.out_wrap_inner(v)
+    }
+
+    fn out_wrap_inner(&self, v: &Bound<'py, PyAny>) -> ERes<Bound<'py, PyAny>> {
         let st = *self.aestate.borrow();
         if !st.vol {
             return Ok(if st.ae { self.esc().call1((v,))? } else { v.str()?.into_any() });
@@ -1242,6 +1288,13 @@ impl<'py> Ev<'py> {
     /// strings and joins them with `Environment.concat` (plain `"".join`), so
     /// static template text is never escaped here.
     fn out_join(&self, chunks: Vec<Bound<'py, PyAny>>) -> ERes<Bound<'py, PyAny>> {
+        #[cfg(feature = "prof")]
+        return crate::prof::time("out-join", || self.out_join_inner(chunks));
+        #[cfg(not(feature = "prof"))]
+        self.out_join_inner(chunks)
+    }
+
+    fn out_join_inner(&self, chunks: Vec<Bound<'py, PyAny>>) -> ERes<Bound<'py, PyAny>> {
         let lst = PyList::new(self.py, chunks)?;
         let empty = PyString::new(self.py, "");
         Ok(empty.call_method1("join", (&lst,))?)
@@ -1854,6 +1907,13 @@ other => Err(nope(other.to_string())),
     }
 
     fn enter_scope(&self, kinds: &HashMap<String, IK>) -> ERes<()> {
+        #[cfg(feature = "prof")]
+        return crate::prof::time("scope-enter", || self.enter_scope_inner(kinds));
+        #[cfg(not(feature = "prof"))]
+        self.enter_scope_inner(kinds)
+    }
+
+    fn enter_scope_inner(&self, kinds: &HashMap<String, IK>) -> ERes<()> {
         let sc = self.init_scope(kinds)?;
         self.stack.borrow_mut().push(Rc::new(RefCell::new(sc)));
         Ok(())
@@ -1869,7 +1929,87 @@ other => Err(nope(other.to_string())),
     }
 
     fn pop_scope(&self) {
+        #[cfg(feature = "prof")]
+        crate::prof::time("scope-pop", || self.pop_scope_inner());
+        #[cfg(not(feature = "prof"))]
+        self.pop_scope_inner()
+    }
+
+    fn pop_scope_inner(&self) {
         self.stack.borrow_mut().pop();
+    }
+
+    /// Warm-path cache of the per-render pre-execution analyses for one tree.
+    /// A miss runs the exact scan / layout check / root-frame symbol analysis
+    /// that used to run on every render and stores the outcome; a hit (same
+    /// tree pointer AND same environment autoescape flag) reuses it.  The
+    /// parsed AST is immutable, so a fixed pointer identifies one source.
+    fn unit_prep(&self, av: &Av) -> ERes<UnitPrep> {
+        let key = av as *const Av;
+        let ae = self.s.autoescape;
+        if let Some(p) = self.s.unit_prep.borrow().get(&key) {
+            if p.autoescape == ae {
+                return Ok(p.clone());
+            }
+        }
+        // Cold path: the unchanged per-render analyses, in their original
+        // order (scan before layout), with the same error precedence.
+        let scan_res = self.scan(av);
+        let (scan_ok, scan_reason) = match scan_res {
+            Ok(()) => (true, None),
+            Err(EvalErr::Unsupported(u)) => (false, Some(u)),
+            Err(EvalErr::Exc(e)) => return Err(EvalErr::Exc(e)),
+        };
+        let layout_res = if scan_ok { self.check_layout(av, true) } else { Ok(()) };
+        let (layout_ok, layout_reason) = match layout_res {
+            Ok(()) => (true, None),
+            Err(EvalErr::Unsupported(u)) => (false, Some(u)),
+            Err(EvalErr::Exc(e)) => return Err(EvalErr::Exc(e)),
+        };
+        let (root_kinds, uses_self) = if scan_ok && layout_ok {
+            let items = match av {
+                Av::Node("Template", _, a) => match a.first() {
+                    Some(Av::List(l)) => l,
+                    _ => return Err(nope("bad template body")),
+                },
+                _ => return Err(nope("template node expected")),
+            };
+            let mut occs: Vec<Occ> = Vec::new();
+            for it in items {
+                self.walk_fsf(it, &mut occs);
+            }
+            let mut kinds = self.build_kinds(&occs, &[]);
+            // the root frame gets `self` when the name is accessed undeclared
+            // outside blocks (codegen's find_undeclared over node.body).
+            let mut track = [true];
+            let mut found = [false];
+            for it in items {
+                self.spec1_walk(it, &mut track, &mut found);
+            }
+            if found[0] {
+                kinds.insert("self".to_string(), IK::Param);
+            }
+            (kinds.into_iter().collect(), found[0])
+        } else {
+            (Vec::new(), false)
+        };
+        let prep = UnitPrep {
+            autoescape: ae,
+            scan_ok,
+            scan_reason,
+            layout_ok,
+            layout_reason,
+            root_kinds,
+            uses_self,
+        };
+        // bounded: the AST cache holds at most 1024 trees, so beyond that the
+        // map only churns -- drop entries until it fits again.
+        let mut cache = self.s.unit_prep.borrow_mut();
+        if cache.len() >= 2048 {
+            cache.clear();
+        }
+        cache.insert(key, prep.clone());
+        Ok(prep)
     }
 
     /// True if a Name node loading `target` appears anywhere below (the
@@ -1907,6 +2047,8 @@ other => Err(nope(other.to_string())),
             Av::Node(n, l, a) => (*n, *l, a),
             _ => return Err(nope("statement node expected")),
         };
+        #[cfg(feature = "prof")]
+        crate::prof::add("nodes-visited", 1);
         match name {
             // Top-level output of a template that mentions `{% extends %}` is
             // guarded at runtime by the `parent_template` check, or dropped
@@ -2185,6 +2327,13 @@ other => Err(nope(other.to_string())),
     }
 
     fn store_target(&self, tgt: &Av, val: &Bound<'py, PyAny>, iter_style: bool) -> ERes<()> {
+        #[cfg(feature = "prof")]
+        return crate::prof::time("store-target", || self.store_target_inner(tgt, val, iter_style));
+        #[cfg(not(feature = "prof"))]
+        self.store_target_inner(tgt, val, iter_style)
+    }
+
+    fn store_target_inner(&self, tgt: &Av, val: &Bound<'py, PyAny>, iter_style: bool) -> ERes<()> {
         match tgt {
             Av::Node("Name", _, a) => {
                 let name = match arg_str(&a[0]) {
@@ -2524,14 +2673,40 @@ other => Err(nope(other.to_string())),
                 }
             }
         } else {
-            let mut it = iter_val.try_iter()?;
-            while let Some(item_r) = it.next() {
-                let item: Bound<'py, PyAny> = item_r?;
-                self.enter_scope(&kinds)?;
-                self.store_target(&args[0], &item, false)?;
-                self.exec_items(&body_of(args), out)?;
+            // Fast path for simple loop targets
+            let simple_target = matches!(&args[0], Av::Node("Name", _, _));
+            let reusable = simple_target
+                && kinds.iter().all(|(_, k)| matches!(k, IK::Param | IK::Undef)); // no Resolve/Alias
+            if reusable {
+                // Get the target name for reuse
+                let target_name = match &args[0] {
+                    Av::Node("Name", _, a) if !a.is_empty() => arg_str(&a[0]).ok_or(nope("invalid loop target"))?,
+                    _ => return Err(nope("invalid loop target")),
+                };
+                
+                let frame = Rc::new(RefCell::new(self.init_scope(&kinds)?)); // ONCE
+                self.stack.borrow_mut().push(frame.clone());
+                let mut it = iter_val.try_iter()?;
+                while let Some(item_r) = it.next() {
+                    let item = item_r?;
+                    if let Some(top) = self.stack.borrow().last().cloned() {   // top == loop frame (store precedes body)
+                        top.borrow_mut().slots.insert(target_name.to_string(), Some(item.clone().unbind()));
+                    }
+                    self.exec_items(&body_of(args), out)?;
+                    ran = true;
+                }
                 self.pop_scope();
-                ran = true;
+            } else {
+                // existing enter/store/exec/pop loop, unchanged
+                let mut it = iter_val.try_iter()?;
+                while let Some(item_r) = it.next() {
+                    let item: Bound<'py, PyAny> = item_r?;
+                    self.enter_scope(&kinds)?;
+                    self.store_target(&args[0], &item, false)?;
+                    self.exec_items(&body_of(args), out)?;
+                    self.pop_scope();
+                    ran = true;
+                }
             }
         }
         if !else_list.is_empty() && !ran {
@@ -3871,24 +4046,16 @@ other => Err(nope(other.to_string())),
             },
             _ => return Err(nope("template node expected")),
         };
-        let mut occs: Vec<Occ> = Vec::new();
-        for it in items {
-            self.walk_fsf(it, &mut occs);
+        // Root-frame symbol analysis (walk_fsf + build_kinds + the `self`
+        // undeclared walk) is a pure function of the immutable tree, so it is
+        // computed once per tree and cached by `unit_prep` (warm-path pass);
+        // on a cache miss this reproduces exactly what ran here before.
+        let prep = self.unit_prep(&unit.tree)?;
+        let mut kinds: HashMap<String, IK> = HashMap::with_capacity(prep.root_kinds.len());
+        for (k, v) in &prep.root_kinds {
+            kinds.insert(k.clone(), *v);
         }
-        let mut kinds = self.build_kinds(&occs, &[]);
-        // the root frame gets `self` when the name is accessed undeclared
-        // outside blocks (codegen's find_undeclared over node.body).
-        let uses_self = {
-            let mut track = [true];
-            let mut found = [false];
-            for it in items {
-                self.spec1_walk(it, &mut track, &mut found);
-            }
-            found[0]
-        };
-        if uses_self {
-            kinds.insert("self".to_string(), IK::Param);
-        }
+        let uses_self = prep.uses_self;
         let re = Rc::new(RootExec { any_extends: unit.any_extends, extended: RefCell::new(false), parent: RefCell::new(None) });
         self.enter_boundary_scope(&kinds)?;
         if uses_self {
@@ -3925,6 +4092,8 @@ other => Err(nope(other.to_string())),
         }
         self.ext_stack.borrow_mut().pop();
         self.pop_scope();
+        #[cfg(feature = "prof")]
+        crate::prof::flush("unit");
         res
     }
 
@@ -4371,16 +4540,22 @@ pub fn evaluate_with_sources<'py>(
         Err(EvalErr::Exc(e)) => return EvalOutcome::Exc(e),
         Err(EvalErr::Unsupported(u)) => return EvalOutcome::Unsupported(u),
     };
-    match ev.scan(av) {
-        Ok(()) => {}
+    // Scan and layout check are pure functions of the immutable tree plus the
+    // environment's static autoescape flag, so their verdicts are computed
+    // once per tree and cached (warm-path pass); on a miss this reproduces
+    // exactly what ran here before, in the same order.
+    let prep = match ev.unit_prep(av) {
+        Ok(p) => p,
         Err(EvalErr::Unsupported(u)) => return EvalOutcome::Unsupported(u),
         Err(EvalErr::Exc(e)) => return EvalOutcome::Exc(e),
+    };
+    if !prep.scan_ok {
+        return EvalOutcome::Unsupported(prep.scan_reason.unwrap_or_else(|| "scan".into()));
     }
-    if let Err(e) = ev.check_layout(av, true) {
-        match e {
-            EvalErr::Unsupported(u) => return EvalOutcome::Unsupported(u),
-            EvalErr::Exc(x) => return EvalOutcome::Exc(x),
-        }
+    if !prep.layout_ok {
+        return EvalOutcome::Unsupported(
+            prep.layout_reason.unwrap_or_else(|| "layout check".into()),
+        );
     }
     // prepare and register the top template's own blocks before anything runs.
     let unit = match ev.prepare_unit(av, ev.sname()) {
