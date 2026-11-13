@@ -17,7 +17,7 @@ use std::rc::Rc;
 use std::sync::Mutex;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyString, PyTuple};
+use pyo3::types::{PyBool, PyDict, PyInt, PyList, PyString, PyTuple};
 use pyo3::IntoPyObjectExt;
 
 use crate::parser::{Av, PToken, RtParser};
@@ -918,12 +918,34 @@ impl<'py> Ev<'py> {
 
     fn out_wrap_inner(&self, v: &Bound<'py, PyAny>) -> ERes<Bound<'py, PyAny>> {
         let st = *self.aestate.borrow();
+        if !st.vol && !st.ae {
+            // Fast path: no autoescape, non-volatile.
+            // For existing strings, return as-is (str(str) is identity).
+            if v.is_instance_of::<PyString>() {
+                return Ok(v.clone());
+            }
+            // For ints (but NOT bools — bool is a subclass of int in Python),
+            // format directly in Rust (avoids a pyo3 str() call).
+            // Falls back to v.str() for values that don't fit in i64.
+            if v.is_instance_of::<PyInt>() && !v.is_instance_of::<PyBool>() {
+                if let Ok(n) = v.extract::<i64>() {
+                    return Ok(PyString::new(self.py, &n.to_string()).into_any());
+                }
+            }
+            return Ok(v.str()?.into_any());
+        }
         if !st.vol {
-            return Ok(if st.ae { self.esc().call1((v,))? } else { v.str()?.into_any() });
+            return Ok(self.esc().call1((v,))?);
         }
         if self.live_ae()? {
             Ok(self.esc().call1((v,))?)
         } else {
+            // Non-volatile fallback: int fast path (exclude bools)
+            if v.is_instance_of::<PyInt>() && !v.is_instance_of::<PyBool>() {
+                if let Ok(n) = v.extract::<i64>() {
+                    return Ok(PyString::new(self.py, &n.to_string()).into_any());
+                }
+            }
             Ok(v.str()?.into_any())
         }
     }
@@ -1310,9 +1332,22 @@ impl<'py> Ev<'py> {
     }
 
     fn out_join_inner(&self, chunks: Vec<Bound<'py, PyAny>>) -> ERes<Bound<'py, PyAny>> {
-        let lst = PyList::new(self.py, chunks)?;
-        let empty = PyString::new(self.py, "");
-        Ok(empty.call_method1("join", (&lst,))?)
+        // Fast path: all chunks are plain strings → build a single Rust String
+        // and cross into Python once.  Falls back to the PyList + Python join
+        // if any chunk is not a str (e.g. Markup in autoescape mode).
+        let mut buf = String::new();
+        for chunk in &chunks {
+            match chunk.extract::<String>() {
+                Ok(s) => buf.push_str(&s),
+                Err(_) => {
+                    // Non-string chunk: use the original Python join path
+                    let lst = PyList::new(self.py, chunks)?;
+                    let empty = PyString::new(self.py, "");
+                    return Ok(empty.call_method1("join", (&lst,))?);
+                }
+            }
+        }
+        Ok(PyString::new(self.py, &buf).into_any())
     }
 
     /// Subscript of a `Getitem` node.  Slices bypass `Environment.getitem`

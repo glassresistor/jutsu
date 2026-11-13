@@ -61,13 +61,40 @@ def eligible(environment) -> bool:
     return True
 
 
+_CTX_CACHE: "OrderedDict[tuple, object]" = OrderedDict()
+_MAX_CACHED_CONTEXTS = 256
+
+
 def make_context(environment, variables=None, name=None, globals_=None):
-    """Build the same `Context` a `Template` would use for this render."""
+    """Build the same `Context` a `Template` would use for this render.
+
+    When no variables are passed (the common hot-loop case), the Context is
+    cached and reused across calls.  Mutable state (vars, exported_vars,
+    eval_ctx.volatile) is reset before each reuse so semantics are identical
+    to building a fresh context every time.
+    """
+    if variables is None or len(variables) == 0:
+        key = (id(environment), name)
+        ctx = _CTX_CACHE.get(key)
+        if ctx is not None:
+            _CTX_CACHE.move_to_end(key)
+            # Reset mutable state that the rust evaluator may have written
+            ctx.vars.clear()
+            ctx.exported_vars.clear()
+            ctx.eval_ctx.volatile = False
+            return ctx
     if globals_ is None:
         globals_ = environment.make_globals(None)
-    return _runtime.new_context(
+    ctx = _runtime.new_context(
         environment, name, {}, dict(variables or {}), False, globals_, None
     )
+    # Cache only the no-variables case (safe to reset)
+    if variables is None or len(variables) == 0:
+        key = (id(environment), name)
+        _CTX_CACHE[key] = ctx
+        while len(_CTX_CACHE) > _MAX_CACHED_CONTEXTS:
+            _CTX_CACHE.popitem(last=False)
+    return ctx
 
 
 def prepare_sources(environment, templates):
