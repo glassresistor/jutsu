@@ -81,7 +81,13 @@ Latest numbers (`scripts/bench_perf.py`, N=3000, part-2a build):
 | expression `{{ a ~ b }}` | 30.2 µs | 234.6 µs | 5.0 µs | 10.5 µs |
 | statement (set/for/if/loop/with) | 148.0 µs | 771.9 µs | 6.3 µs | 21.1 µs |
 
-Cold rust wins ~8× / ~5×; warm rust costs 2.1× / 3.3× of python's cached path.
+After exec_for optimization:
+| shape | rust cold | python cold | python warm | rust warm |
+|---|---|---|---|---|
+| expression `{{ a ~ b }}` | 30.2 µs | 234.6 µs | 5.0 µs | 10.5 µs |
+| statement (set/for/if/loop/with) | 148.0 µs | 771.9 µs | 6.3 µs | **16.2 µs** |
+
+Cold rust wins ~8× / ~5×; warm rust costs 2.1× / 3.3× of python's cached path (16.2 µs vs 6.3 µs after optimization).
 The completion criteria were retargeted (2026-11-01, `PLAN_C_DONE.md`): a
 warm-rust *beat* gate was judged unreachable for a tree-walking interpreter,
 so warm loads only need to sit in a comparability band (≤ 4× python warm and
