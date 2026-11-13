@@ -14,6 +14,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Mutex;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
@@ -212,6 +213,19 @@ pub struct Session {
     /// the same object instead of a per-node pyo3 attribute lookup
     /// (performance pass part 2).  Module-level objects never change during a
     /// render, so this is byte-identical to fetching them on demand.
+    esc: Py<PyAny>,
+    markup_cls: Py<PyAny>,
+    str_join: Py<PyAny>,
+    markup_join: Py<PyAny>,
+    /// Static cache for stable runtime constants keyed by rt module pointer
+    rt_constants_cache: Mutex<HashMap<usize, Rc<RuntimeConstants>>>,
+}
+
+/// Static runtime constants that are cached once per rt module to avoid repeated pyo3 attribute lookups
+struct RuntimeConstants {
+    missing: Py<PyAny>,
+    loopctx: Py<PyAny>,
+    ns: Py<PyAny>,
     esc: Py<PyAny>,
     markup_cls: Py<PyAny>,
     str_join: Py<PyAny>,

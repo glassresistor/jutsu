@@ -88,6 +88,8 @@ After exec_for optimization:
 | statement (set/for/if/loop/with) | 148.0 µs | 771.9 µs | 6.3 µs | **16.2 µs** |
 
 Cold rust wins ~8× / ~5×; warm rust costs 2.1× / 3.3× of python's cached path (16.2 µs vs 6.3 µs after optimization).
+
+The second optimization (caching rt module constants) is planned but not yet implemented due to complexity.
 The completion criteria were retargeted (2026-11-01, `PLAN_C_DONE.md`): a
 warm-rust *beat* gate was judged unreachable for a tree-walking interpreter,
 so warm loads only need to sit in a comparability band (≤ 4× python warm and
