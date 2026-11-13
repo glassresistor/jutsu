@@ -591,6 +591,7 @@ impl Session {
             srcs,
             units: RefCell::new(HashMap::new()),
             unit_prep: RefCell::new(HashMap::new()),
+            rt_constants_cache: Mutex::new(HashMap::new()),
         }))
     }
 }
