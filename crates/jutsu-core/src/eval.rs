@@ -209,20 +209,25 @@ pub struct Session {
     /// which is re-checked on every hit.  A miss recomputes everything exactly
     /// as before and stores the result.
     unit_prep: RefCell<HashMap<*const Av, UnitPrep>>,
-    /// Stable runtime functions cached at session build so every use reuses
-    /// the same object instead of a per-node pyo3 attribute lookup
-    /// (performance pass part 2).  Module-level objects never change during a
-    /// render, so this is byte-identical to fetching them on demand.
+    /// Module-level runtime helpers (escape / Markup / str_join /
+    /// markup_join).  Populated from the process-global `RT_GLOBALS` cache at
+    /// session build so warm renders skip the per-call pyo3 attribute lookups.
     esc: Py<PyAny>,
     markup_cls: Py<PyAny>,
     str_join: Py<PyAny>,
     markup_join: Py<PyAny>,
-    /// Static cache for stable runtime constants keyed by rt module pointer
-    rt_constants_cache: Mutex<HashMap<usize, Rc<RuntimeConstants>>>,
 }
 
-/// Static runtime constants that are cached once per rt module to avoid repeated pyo3 attribute lookups
-struct RuntimeConstants {
+/// Process-global cache of module-level runtime constants.  These objects
+/// (the `missing` sentinel, the `LoopContext`/`Namespace` classes, the
+/// `escape`/`Markup`/`str_join`/`markup_join` helpers and `builtins.slice`)
+/// live on the single `jutsu.runtime` module and never change for the life of
+/// the process.  Fetching them once instead of re-doing ~8 pyo3 attribute
+/// lookups plus a `builtins` import on every render removes a fixed cost from
+/// the hot path.  Keyed by identity of the rt module: if a different runtime
+/// module is ever passed, the cache is transparently rebuilt for it.
+struct RtGlobals {
+    rt: Py<PyAny>,
     missing: Py<PyAny>,
     loopctx: Py<PyAny>,
     ns: Py<PyAny>,
@@ -230,6 +235,60 @@ struct RuntimeConstants {
     markup_cls: Py<PyAny>,
     str_join: Py<PyAny>,
     markup_join: Py<PyAny>,
+    slice_cls: Py<PyAny>,
+}
+
+impl RtGlobals {
+    fn clone_all(&self, py: Python<'_>) -> RtGlobals {
+        RtGlobals {
+            rt: self.rt.clone_ref(py),
+            missing: self.missing.clone_ref(py),
+            loopctx: self.loopctx.clone_ref(py),
+            ns: self.ns.clone_ref(py),
+            esc: self.esc.clone_ref(py),
+            markup_cls: self.markup_cls.clone_ref(py),
+            str_join: self.str_join.clone_ref(py),
+            markup_join: self.markup_join.clone_ref(py),
+            slice_cls: self.slice_cls.clone_ref(py),
+        }
+    }
+}
+
+static RT_GLOBALS: Mutex<Option<RtGlobals>> = Mutex::new(None);
+
+/// Return the module-level runtime constants for `rt`, building and caching
+/// them on first use.  Every returned field is a fresh refcounted clone, so
+/// the caller may move them into a session without touching the cache again.
+fn rt_globals(py: Python<'_>, rt: &Bound<'_, PyAny>) -> Result<RtGlobals, PyErr> {
+    {
+        let g = RT_GLOBALS.lock().unwrap();
+        if let Some(c) = &*g {
+            if c.rt.is(rt) {
+                return Ok(c.clone_all(py));
+            }
+        }
+    }
+    let missing = rt.getattr("missing")?.unbind();
+    let loopctx = rt.getattr("LoopContext")?.unbind();
+    let ns = rt.getattr("Namespace")?.unbind();
+    let esc = rt.getattr("escape")?.unbind();
+    let markup_cls = rt.getattr("Markup")?.unbind();
+    let str_join = rt.getattr("str_join")?.unbind();
+    let markup_join = rt.getattr("markup_join")?.unbind();
+    let slice_cls = py.import("builtins")?.getattr("slice")?.unbind();
+    let fresh = RtGlobals {
+        rt: rt.clone().unbind(),
+        missing,
+        loopctx,
+        ns,
+        esc,
+        markup_cls,
+        str_join,
+        markup_join,
+        slice_cls,
+    };
+    *RT_GLOBALS.lock().unwrap() = Some(fresh.clone_all(py));
+    Ok(fresh)
 }
 
 /// How a slot is initialized when its scope is entered (mirrors the code
@@ -554,35 +613,29 @@ impl Session {
             Ok(d) => d,
             Err(_) => return Err(nope("environment.tests is not a dict")),
         };
-        let slice_cls = py.import("builtins")?.getattr("slice")?;
         if !env.getattr("finalize")?.is_none() {
             return Err(nope("environment finalize function"));
         }
-        let missing = rt.getattr("missing")?;
-        let loopctx = rt.getattr("LoopContext")?;
-        let ns = rt.getattr("Namespace")?;
+        // Module-level runtime constants (sentinels, classes, helpers,
+        // builtins.slice) are cached process-globally: they never change, so
+        // warm renders skip ~8 pyo3 attribute lookups + a builtins import.
+        let g = rt_globals(py, rt)?;
         let undef = env.getattr("undefined")?;
-        // Stable runtime functions cached once per session (performance pass
-        // part 2): reusing them avoids a pyo3 attribute lookup on every use.
-        let esc = rt.getattr("escape")?;
-        let markup_cls = rt.getattr("Markup")?;
-        let str_join = rt.getattr("str_join")?;
-        let markup_join = rt.getattr("markup_join")?;
         Ok(Rc::new(Session {
             env: env.unbind(),
             evalctx: evalctx.unbind(),
             rt: rt.clone().unbind(),
             filters: filters.unbind(),
             tests: tests.unbind(),
-            slice_cls: slice_cls.unbind(),
-            missing: missing.unbind(),
+            slice_cls: g.slice_cls,
+            missing: g.missing,
             undef: undef.unbind(),
-            loopctx: loopctx.unbind(),
-            ns: ns.unbind(),
-            esc: esc.unbind(),
-            markup_cls: markup_cls.unbind(),
-            str_join: str_join.unbind(),
-            markup_join: markup_join.unbind(),
+            loopctx: g.loopctx,
+            ns: g.ns,
+            esc: g.esc,
+            markup_cls: g.markup_cls,
+            str_join: g.str_join,
+            markup_join: g.markup_join,
             autoescape,
             name,
             rec: RefCell::new(Vec::new()),
@@ -591,7 +644,6 @@ impl Session {
             srcs,
             units: RefCell::new(HashMap::new()),
             unit_prep: RefCell::new(HashMap::new()),
-            rt_constants_cache: Mutex::new(HashMap::new()),
         }))
     }
 }
