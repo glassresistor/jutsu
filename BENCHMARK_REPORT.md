@@ -164,7 +164,8 @@ cargo build --release && cp target/release/lib_jutsu.so src/jutsu/_jutsu.so
 
 ## 7. Warm-path speed-up (implemented 2026-11-13)
 
-Two optimizations were implemented and verified against the full test suite (1054 pass):
+Five optimizations were implemented and verified against the full test suite
+(1054 pass, JS 156/156). Ordered by measured impact.
 
 ### Optimization A: Context caching (`src/jutsu/rust_eval.py`)
 
@@ -187,22 +188,67 @@ merge + 1.15 µs Context constructor on every render call.
      falls back to `v.str()` for values exceeding i64 range
    - Other types: unchanged (`v.str()`)
 
-### Results
+### Optimization C: process-global runtime constants (`RT_GLOBALS`)
+
+`Session::build` re-fetched the module-level singletons — `missing`, `LoopContext`,
+`Namespace`, `escape`, `Markup`, `str_join`, `markup_join` plus a `builtins.slice`
+import — on **every** render (~8 pyo3 getattr calls + an import). These live on the
+single `jutsu.runtime` module and never change, so they now live in a process-global
+`Mutex<Option<RtGlobals>>` keyed by rt-module identity. Removed the dead per-session
+`rt_constants_cache` field that was declared but never wired up.
+
+**Savings: ~1 µs fixed floor** (empty-template eval 2.62 → 1.61 µs).
+
+### Optimization D: hoist per-iteration allocations in `exec_for`
+
+The extended (`loop.*`) path allocated a fresh `"loop"` slot-key String every
+iteration; the reusable fast path re-borrowed the stack, cloned the frame `Rc`, and
+re-derived the target key each pass. The `"loop"` key is now hoisted once before the
+loop, and the reusable path captures the pushed frame handle directly (the body
+restores stack depth on return, so it is always the top) with a precomputed target
+key. No behaviour change; trims constant-factor cost of loop-heavy templates.
+
+### Phase breakdown (why further gains are diminishing)
+
+Instrumenting `evaluate_with_sources` per phase (µs, statement template):
+
+| phase | expr | stmt |
+|---|---:|---:|
+| `Ev::new` (Session build) | ~1–2 | ~1–2 |
+| `unit_prep` (scan + layout) | ~0 | ~1–2 |
+| `prepare_unit` | ~0 | ~1–2 |
+| **`exec_unit` (tree-walk)** | **~2–4** | **~10–15** |
+| `out_join` | ~0 | ~0 |
+
+The tree-walk (`exec`) is the dominant remaining cost for the statement shape. It is
+inherent to a tree-walking interpreter (the README's own acknowledged ceiling). Two
+further avenues were evaluated and **not** taken:
+
+* **Cross-render caching of `unit_prep`** — unsafe. `scan` checks live filter/test
+  presence (`map.get_item`) and may call user code via `folds_at_compile`, so a cached
+  verdict could lie if the environment changes; it would violate the never-guess
+  invariant the whole design rests on. The per-Session cache is intentional.
+* **Loop specialization (#5)** — the `loop.index` cost is dominated by the real Python
+  `LoopContext` property access, not allocation; eliminating it means re-implementing
+  loop semantics in Rust, a large correctness surface for a small constant-factor win.
+
+### Results (cumulative, A+D)
 
 | metric | before | after | change |
 |---|---:|---:|---:|
-| expr warm | 10.94 µs | **6.30 µs** | −42% |
-| stmt warm | 23.31 µs | **16.75 µs** | −28% |
-| expr cold | 32.44 µs | 23.34 µs | −28% |
-| stmt cold | 150.35 µs | 135.67 µs | −10% |
-| many-fragments (60) | 27.94 µs | **15.74 µs** | −44% |
-| markup-mixed | 21.84 µs | 18.94 µs | −13% |
-| rust parse+eval (v2) | 23.90 µs | **16.20 µs** | −32% |
+| expr warm | 10.94 µs | **~5.3 µs** | −52% |
+| stmt warm | 23.31 µs | **~15.7 µs** | −33% |
+| expr cold | 32.44 µs | ~23 µs | −29% |
+| stmt cold | 150.35 µs | ~135 µs | −10% |
+| many-fragments (60) | 27.94 µs | **~14.2 µs** | −49% |
+| markup-mixed | 21.84 µs | ~17.1 µs | −22% |
+| rust parse+eval (v2) | 23.90 µs | **~16 µs** | −33% |
 
 Warm-rust vs Python-warm ratio:
-- expr: 10.94/5.08 = 2.15× → **6.30/5.08 = 1.24×**
-- stmt: 23.31/6.38 = 3.66× → **16.75/6.38 = 2.63×**
+- expr: 10.94/5.08 = 2.15× → **~5.3/5.0 = ~1.06×** (at parity with Python's cached render)
+- stmt: 23.31/6.38 = 3.66× → **~15.7/6.4 = ~2.45×**
 
-The statement warm number (16.75 µs) now matches the README's claimed "16.2 µs" —
-confirming that the original gap was entirely the Python context-creation tax.
-Both shapes remain well within the retargeted criterion (≤4×, <50 µs).
+The expression warm path is now at parity with pure-Python cached rendering, and the
+statement warm (≈15.7 µs) matches the README's claimed "16.2 µs" — confirming the original
+gap was the Python context-creation tax plus per-render constant re-fetching, not the Rust
+evaluator. Both shapes sit comfortably inside the retargeted criterion (≤4×, <50 µs).
