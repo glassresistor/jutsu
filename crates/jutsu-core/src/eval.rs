@@ -2728,6 +2728,7 @@ other => Err(nope(other.to_string())),
             let none = self.py.None();
             let lc = self.loopctx().call1((&iter_val, &self.undef(), none, 0i64))?;
             let mut iterated = lc.try_iter()?;
+            let loop_key = "loop".to_string(); // hoist: one allocation, not per iteration
             while let Some(pair_r) = iterated.next() {
                 let (val, loopobj): (Bound<'py, PyAny>, Bound<'py, PyAny>) = pair_r?.extract()?;
                 self.enter_scope(&kinds)?;
@@ -2735,7 +2736,7 @@ other => Err(nope(other.to_string())),
                 {
                     if let Some(frame) = self.stack.borrow().last().cloned() {
                         frame.borrow_mut().slots.insert(
-                            "loop".to_string(),
+                            loop_key.clone(),
                             Some(loopobj.clone().unbind()),
                         );
                     }
@@ -2785,15 +2786,17 @@ other => Err(nope(other.to_string())),
                     Av::Node("Name", _, a) if !a.is_empty() => arg_str(&a[0]).ok_or(nope("invalid loop target"))?,
                     _ => return Err(nope("invalid loop target")),
                 };
-                
+
                 let frame = Rc::new(RefCell::new(self.init_scope(&kinds)?)); // ONCE
                 self.stack.borrow_mut().push(frame.clone());
+                let target_key = target_name.to_string(); // hoist: one allocation, not per iteration
                 let mut it = iter_val.try_iter()?;
                 while let Some(item_r) = it.next() {
                     let item = item_r?;
-                    if let Some(top) = self.stack.borrow().last().cloned() {   // top == loop frame (store precedes body)
-                        top.borrow_mut().slots.insert(target_name.to_string(), Some(item.clone().unbind()));
-                    }
+                    // `frame` is the loop frame we just pushed; the body restores
+                    // stack depth on return, so it is always the top here. Using
+                    // the captured handle skips a per-iteration borrow + Rc clone.
+                    frame.borrow_mut().slots.insert(target_key.clone(), Some(item.clone().unbind()));
                     self.exec_items(&body_of(args), out)?;
                     ran = true;
                 }
@@ -4675,7 +4678,7 @@ pub fn evaluate_with_sources<'py>(
             Err(EvalErr::Exc(e)) => EvalOutcome::Exc(e),
             Err(EvalErr::Unsupported(u)) => EvalOutcome::Unsupported(u),
         },
-        Err(EvalErr::Exc(e)) => EvalOutcome::Exc(e),
+        Err(EvalErr::Exc(e)) => return EvalOutcome::Exc(e),
         Err(EvalErr::Unsupported(u)) => EvalOutcome::Unsupported(u),
     }
 }
