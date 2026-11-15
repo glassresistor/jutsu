@@ -45,9 +45,17 @@ count, rebuild fails loudly rather than silently.
    core (flag: `JUTSU_RUST_PARSER`, default on when no extensions are active)
    and run the original 911-test suite unchanged.
 
-## Work items
+## Settled Behavior: Extension Fallback Rule (Phase D/D1)
 
-* [x] PLAN/TODO docs
+The rule is now settled and enforced end-to-end: any extension contributing
+tags (`do`, `break`/`continue`), `filter_stream`, or `preprocess` forces the
+**python parse+codegen path** (and therefore never rust serving). This is
+verified by differential tests against Jinja2 3.1.6. Pure runtime extensions
+(filters/tests only) remain rust-eligible.
+
+## Work items (Current Focus: C-v8a Wiring)
+
+* [x] PLAN/TODO docs (Updated to reflect roadmap shift)
 * [x] `parser.rs`: TokenStream mirror (`current`/`look`/`skip`/`push`/`expect`)
 * [x] expression grammar: condexpr/or/and/not/compare/math1/concat/math2/pow/
       unary/primary/tuple/list/dict/postfix/filter_expr/subscript/subscribed/
@@ -59,18 +67,37 @@ count, rebuild fails loudly rather than silently.
 * [x] error messages parity (`fail`, `_fail_ut_eof`, expect-style errors)
 * [x] `ast_rebuild.py` + registry over all concrete node classes
 * [x] pyo3 glue: `parse(tokens) -> AST | (__error__, msg, lineno)`
-* [x] differential tests (repo templates + fuzz), dump + lineno equality
-* [x] flip default, full suite green, commit
+* **[IN PROGRESS]** differential tests (repo templates + fuzz), dump + lineno equality
+* **[PENDING]** flip default (`JUTSU_RUST_PARSER=1`) and run the original 911-test suite unchanged.
+
+## Roadmap Alignment (Post C-v4b)
+
+The parser is now a stable prerequisite for the evaluator, which is currently
+in C-v4b. The parser's completion allows us to proceed with:
+
+**C-v8a (Wiring Scaffolding - Current Focus):** Wire the rust AST into
+`Template.render`, implementing the eligibility predicate (`rust_eval.eligible`),
+the per-template serve decision, and moving scan/symbol analysis from per-render
+to per-template-compile.
+
+**C-v8b (Cross-Template Serving):** Ensure included/imported templates are served
+by rust when eligible, not just compiled by python codegen.
+
+**C-v8c (Gate Measurement & Flip):** Run benchmarks, confirm the comparability
+band (R2), and flip `JUTSU_RUST_EVAL` default to ON.
+
+**C-v9 (Optional Polish):** Runtime optimization candidates (e.g., constant
+hoists, per-node PyO3 reduction).
 
 ## Lessons recorded
 
 * The python `TokenStream` iterator advances *before* yielding, so consuming
-  it into a list loses the last token fetched before a lexer error.  Consume
-  the wrapped generator directly instead (`rust_parse.wrapped_tokens`).  A
+  it into a list loses the last token fetched before a lexer error. Consume
+  the wrapped generator directly instead (`rust_parse.wrapped_tokens`). A
   partial token is a real, consumable token; the error surfaces only on the
   fetch *past* it -- mirrored in rust by `tok_at`/`next_tok` raising the
   stored lexer error exactly where python's generator would.
 * CPython `repr()` short-escapes only `\n`, `\t`, `\r`; everything else uses
-  `\xHH`/`\uXXXX`/`\UXXXXXXXX`.  When a string contains both quote kinds the
+  `\xHH`/`\uXXXX`/`\UXXXXXXXX`. When a string contains both quote kinds the
   single quote is kept, apostrophes are escaped and double quotes are left
   alone (`pyrepr.rs`).
