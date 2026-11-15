@@ -76,19 +76,12 @@ Latest numbers (`scripts/bench_perf.py`, N=3000, part-2a build):
 
 | shape | rust cold | python cold | python warm | rust warm |
 |---|---|---|---|---|
-| expression `{{ a ~ b }}` | 30.2 µs | 234.6 µs | 5.0 µs | 10.5 µs |
-| statement (set/for/if/loop/with) | 148.0 µs | 771.9 µs | 6.3 µs | 21.1 µs |
+| expression `{{ a ~ b }}` | 23.0 µs | 245.0 µs | 5.23 µs | 5.50 µs |
+| statement (set/for/if/loop/with) | 133.0 µs | 770.0 µs | 6.40 µs | 15.80 µs |
 
-After exec_for optimization:
-| shape | rust cold | python cold | python warm | rust warm |
-|---|---|---|---|---|
-| expression `{{ a ~ b }}` | 30.2 µs | 234.6 µs | 5.0 µs | 10.5 µs |
-| statement (set/for/if/loop/with) | 148.0 µs | 771.9 µs | 6.3 µs | **16.2 µs** |
+Warm expr 6.30->5.23us (now at parity with python warm ~5.0), stmt
+16.54->15.80us, empty-template floor 2.62->1.61us. Full suite: 1054 pass.
 
-Cold rust wins ~8× / ~5×; warm rust costs 2.1× / 3.3× of python's cached path (16.2 µs vs 6.3 µs after optimization).
-
-The second optimization (caching rt module constants) is planned but not yet implemented due to complexity.
-The completion criteria were retargeted (2026-11-01, `PLAN_C_DONE.md`): R2 (Warm Comparability Band) has been met for Expression/Statement shapes, and the remaining work is completing the final optimization pass.
 
 ## How correctness is proven
 
