@@ -218,7 +218,7 @@ python scripts/js_golden.py   # regenerate the CPython golden capture
 |---|---|---|
 | `JUTSU_RUST_LEXER` | `1` | `=0` falls back to the pure-Python lexer (`Lexer._tokeniter_python`) |
 | `JUTSU_RUST_PARSER` | `1` | `=0` switches parsing back to the Python parser |
-| `JUTSU_RUST_EVAL` | `0` | `=1` lets eligible templates render through the Rust evaluator instead of python codegen (slice C-v8a; default flips at v8c) |
+| `JUTSU_RUST_EVAL` | `1` | `=0` disables the Rust evaluator, forcing fallback to Python codegen |
 
 The Rust core is optional at import time: if `_jutsu` cannot be imported,
 `jutsu` degrades to the pure-Python implementation rather than failing.

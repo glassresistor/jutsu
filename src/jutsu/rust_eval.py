@@ -39,7 +39,7 @@ def eligible(environment) -> bool:
 
     if _jutsu is None or not has_rust_core():
         return False
-    if os.environ.get("JUTSU_RUST_EVAL", "0") == "0":
+    if os.environ.get("JUTSU_RUST_EVAL", "1") == "0":
         return False
     if getattr(environment, "is_async", False):
         return False
